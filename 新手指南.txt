@@ -1,0 +1,710 @@
+================================================================================
+           YOLOVO  开放词汇图文目标检测项目  ——  新手使用指南
+================================================================================
+
+本指南面向第一次接触本项目的朋友，教你从零开始：搭环境 → 备数据 → 跑实验 →
+换模型 → 看指标。所有操作都围绕项目根目录下已经写好的脚本展开，你只需要
+「改两行路径 / 改几个参数 → 用你自己的 Python 环境运行」，不需要自己写代码。
+
+本项目只有一个模型家族：
+  - YOLOVO   开放词汇图文检测模型（YOLO骨干 + 文本塔）
+    通过给定的「类别名文本」，在 RGB 图像上检测对应类别的目标。
+    支持任务：目标检测（detect）、实例分割（segment）、旋转框（obb）、姿态（pose）。
+    模型规模：n / s / m / l / x（同 YOLO 系列）。
+
+与传统 YOLO 的区别：YOLOVO 是「开放词汇」—— 训练时见过/没见过的类别，
+只要推理时给出类别名字符串就能检测，无需重新训练。
+
+阅读建议：第一次请按第 1→2→3 章顺序走通一遍；第 4、5 章作为查阅手册。
+
+文中凡是形如 <你的...> 的内容，都是需要你按自己机器/数据替换的占位符。
+
+
+================================================================================
+第 1 章   环 境 准 备
+================================================================================
+
+--------------------------------------------------------------------------
+1.1  硬件要求
+--------------------------------------------------------------------------
+训练、验证、推理都需要一张 NVIDIA 显卡（建议显存 ≥ 8GB，越大越好）。
+训练 batch 越大越吃显存；首次训练需联网下载 MobileCLIP 文本塔权重（约几十 MB）。下载链接见群精华消息。
+检查你的显卡：
+    nvidia-smi                  # 查看显卡型号、驱动版本、显存大小
+
+--------------------------------------------------------------------------
+1.2  创建 Python 环境
+--------------------------------------------------------------------------
+本项目要求 Python ≥ 3.10（推荐 3.10，最高用到 3.12；暂勿用 3.13 及以上，部分依赖尚未适配）。
+可以用 conda，也可以用系统自带的 venv，二选一即可。
+
+【方式 A：用 conda】（推荐）
+    conda create -n yolovo python=3.10 -y
+    conda activate yolovo
+（环境名 yolovo 只是建议，你可以自己起名；之后每次用项目前都先 conda activate 它）
+
+【方式 B：用 venv】
+    python3.10 -m venv yolovo-env
+    # Windows:  yolovo-env\Scripts\activate
+    # Linux/Mac: source yolovo-env/bin/activate
+
+--------------------------------------------------------------------------
+1.3  安装依赖
+--------------------------------------------------------------------------
+本项目本身是源码（项目根目录下的 ultralytics 文件夹就是包本身），不需要 pip install
+本项目，只要在「项目根目录」下运行脚本，Python 就能 import 到它。你只需装好下面的
+运行依赖（在你刚激活的环境里执行）：
+
+第一步：确认你的显卡驱动支持的 CUDA 上限。
+    先看 nvidia-smi，它右上角的 "CUDA Version: 12.x" 表示【当前驱动支持的最高 CUDA 版本】，
+    并不代表你已经装了 CUDA。下面 PyTorch 选的 CUDA 变体只要 ≤ 这个数字就能正常使用。
+
+第二步：安装带 CUDA 的 PyTorch（本项目要求 PyTorch ≥ 2.5.0，推荐 2.5.1）。
+    PyTorch 2.5.x 官方提供两种 CUDA 12.x 变体（本项目不支持 CUDA 11.8 / cu118），按你的驱动上限
+    选一条命令（Windows / Linux 通用）：
+
+    驱动支持上限        变体      安装命令
+    ──────────────     ────      ──────────────────────────────────────────────────────────────────────
+    CUDA ≥ 12.1         cu121     pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+    CUDA ≥ 12.4         cu124     pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+
+    拿不准就选 cu121（兼容性最好，绝大多数支持 CUDA 12 的显卡驱动都能直接用）。
+    想用更新的 torch（2.6 / 2.7）也可以，去 https://pytorch.org/get-started/locally/ 用官方选择器
+    生成命令，但本项目最低只要求 2.5，无需刻意追新。
+    ⚠ 记得带上 --index-url 指定 CUDA 源；不带它会装成 CPU 版，训练时 CUDA 不可用。
+
+第三步：安装其余依赖（numpy 已 pin 在 2.0 以下，避免与 PyTorch 产生 ABI 不兼容）：
+    pip install "numpy<2.0" opencv-python pillow pyyaml requests matplotlib pandas seaborn tqdm psutil scipy
+    pip install timm                                # MobileCLIP 文本塔依赖
+
+第四步（按需）：
+    pip install pycocotools        # 跑 COCO 标准评测时需要
+    pip install onnx onnxruntime   # 导出 ONNX 时需要
+    pip install tensorrt           # 导出 TensorRT engine 时需要（可选）
+
+提示：如果运行脚本时报 ModuleNotFoundError: No module named 'xxx'，按提示
+pip install xxx 即可。
+
+--------------------------------------------------------------------------
+1.4  验证环境是否就绪
+--------------------------------------------------------------------------
+    python --version                       # 应为 3.10 ~ 3.12
+    python -c "import torch; print('torch', torch.__version__, 'cuda可用', torch.cuda.is_available())"
+    # 应输出 torch 2.5.x 或更高，且 cuda可用 True。
+    # 若版本低于 2.5 → 按 1.3 第二步重装；若 cuda可用 False → 装成了 CPU 版（漏了 --index-url），重装。
+
+--------------------------------------------------------------------------
+1.5  如何运行项目脚本
+--------------------------------------------------------------------------
+项目根目录（本文件所在目录）下的 .py 脚本，它们都是「直接可运行的入口」。
+统一运行方式：先激活你的环境 → 在项目根目录下执行，例如：
+
+    conda activate yolovo         # 激活你 1.2 建的环境（venv 用户用对应的 activate）
+    python train.py               # YOLOVO 检测训练
+
+注意：务必在【项目根目录】下运行，这样 Python 才能正确找到本地 ultralytics 包。
+
+这些脚本里的参数大多是【硬编码】的（不是命令行参数），用法是：
+  1) 用编辑器打开脚本（如 train.py）
+  2) 修改里面的 model 配置名、data 路径、epochs、batch、device 等
+  3) 保存后 python train.py 运行
+所有脚本默认在「当前工作目录 = 项目根目录」下运行，结果会写到 project/name 指定的目录。
+
+--------------------------------------------------------------------------
+1.6  常见环境问题
+--------------------------------------------------------------------------
+  Q: 报错 No module named 'ultralytics'？
+  A: 你没有在项目根目录下运行。cd 到项目根目录再试。
+
+  Q: torch.cuda.is_available() 返回 False？
+  A: 装的是 CPU 版 PyTorch。按 1.3 第二步重装带 CUDA 的版本（注意 --index-url）。
+
+  Q: 训练一启动就报 RuntimeError: Numpy is not available？
+  A: 这是 NumPy 2.x 与 PyTorch 的 ABI 不兼容（NumPy 升级到 2.0 后破坏了 torch 的 C 接口）。
+     降级 numpy 即可解决：
+         pip install "numpy<2.0"
+     按 1.3 第三步装依赖就不会遇到此问题（已默认 pin numpy<2.0）。
+
+  Q: 报错 torch 版本太旧 / 找不到某个算子？
+  A: 本项目要求 torch ≥ 2.5.0。用 python -c "import torch;print(torch.__version__)" 查版本，
+     低于 2.5 按 1.3 第二步重装。
+
+  Q: 报错 No module named 'timm' 或 MobileCLIP 相关 ImportError？
+  A: YOLOVO 的文本塔依赖 timm 库。按 1.3 第三步装 pip install timm 即可。
+
+  Q: Windows 下训练卡死 / 数据加载报错？
+  A: 把脚本里的 workers=8 改成 workers=0。
+
+  Q: 显存不够 (CUDA out of memory)？
+  A: 调小 batch（如 batch=4 或 2），或换更小的模型规模（见第 4 章）。
+
+
+================================================================================
+第 2 章   数 据 集 准 备
+================================================================================
+
+YOLOVO 同时支持【两种数据集格式】：
+  - 标准 YOLO 数据集 —— 只有 RGB 图像 + 标注
+  - YOLOMM 多模态数据集 —— RGB + X 模态（红外/深度/边缘等）+ 标注
+
+如果你手头只有 RGB 数据，用【标准 YOLO 格式】；如果数据来自 YOLOMM 项目
+（已经有 RGB+X 配对），可以直接复用【YOLOMM 格式】，YOLOVO 训练时只会使用 RGB
+部分，X 模态自动忽略。两种格式的标注都是 YOLO txt 格式，完全相同。
+
+类别名（即文本提示）统一由 data.yaml 的 names 字段提供，训练时自动作为文本
+注入 MobileCLIP 文本塔。
+
+--------------------------------------------------------------------------
+2.1  目录结构约定（务必遵守）
+----------------------------------------------------------------------
+【标准 YOLO 数据集】（只有 RGB）：
+
+    <你的数据集目录>/
+    ├── images/                ← RGB 图（必须）
+    │   ├── train/  000001.jpg  000002.jpg ...
+    │   ├── val/    ...
+    │   └── test/   ...
+    └── labels/                ← YOLO 格式标注
+        ├── train/  000001.txt  000002.txt ...
+        ├── val/    ...
+        └── test/   ...
+
+【YOLOMM 多模态数据集】（RGB + X 模态配对）：
+
+    <你的数据集目录>/
+    ├── images/                ← RGB 图（YOLOVO 用这部分）
+    │   ├── train/  000001.jpg ...
+    │   ├── val/    ...
+    │   └── test/   ...
+    ├── images_thermal/        ← X 模态图（YOLOVO 忽略，仅 YOLOMM 训练时使用）
+    │   ├── train/  000001.jpg ...   ← 与 RGB 同名配对
+    │   ├── val/    ...
+    │   └── test/   ...
+    └── labels/                ← 两类数据集共用同一份 YOLO 标注
+        ├── train/  000001.txt ...
+        ├── val/    ...
+        └── test/   ...
+
+两点注意：
+  1) RGB 图文件名（不含扩展名）必须与对应标注文件名完全一致。
+  2) 如果用 YOLOMM 数据集，X 模态目录名（images_thermal/images_ir/images_depth 等）
+     必须与 data.yaml 中的 modality 字段对应，YOLOVO 会读取 RGB 部分、忽略 X 部分。
+
+--------------------------------------------------------------------------
+2.2  编写 data.yaml
+----------------------------------------------------------------------
+在数据集目录（或项目根目录）下写一个 data.yaml，告诉程序数据在哪、有哪些类别。
+按数据集来源选一种格式。
+
+【格式 A：标准 YOLO 数据集】（推荐，最简单）
+示例（6 类目标检测，路径换成你自己的）：
+
+    path: <你的数据集绝对目录>            # 数据集根目录（只能绝对路径）
+    train: images/train                  # 训练集 RGB 子目录（相对 path）
+    val:   images/val                    # 验证集 RGB 子目录
+    test:  images/test                   # 测试集 RGB 子目录（可选）
+    nc: 6                                # 类别数
+    names:                               # 类别名（0 起，这些名字同时作为文本 prompt）
+      0: People
+      1: Car
+      2: Bus
+      3: Motorcycle
+      4: Lamp
+      5: Truck
+
+【格式 B：YOLOMM 多模态数据集】（来自 YOLOMM 项目的数据）
+示例（RGB + 红外，路径换成你自己的）：
+
+    path: <你的数据集绝对目录>
+    train: ./images/train
+    val:   ./images/val
+    test:  ./images/test
+    modality:                            # 模态定义（YOLOVO 会读取，训练时只用 RGB）
+      rgb: images                        # RGB 图目录
+      ir: images_ir                      # 红外图目录
+      depth: images_depth                # 深度图目录（可选）
+    modality_used: ["rgb", "ir"]         # 当前使用的模态组合
+    nc: 6
+    names:
+      0: People
+      1: Car
+      2: Bus
+      3: Motorcycle
+      4: Lamp
+      5: Truck
+
+字段含义（两种格式通用）：
+  - path           数据集根目录
+  - train/val/test 各 split 的 RGB 图子目录（相对 path）
+  - nc / names     类别数与类别名（训练时 names 会作为文本提示自动注入 MobileCLIP 文本塔）
+  - modality       （仅 YOLOMM 格式）定义数据集中存在哪些模态的目录
+  - modality_used  （仅 YOLOMM 格式）当前使用的模态组合
+
+注意：names 里的类别名就是开放词汇的文本 prompt。训练时 YOLOVO 用 MobileCLIP
+把它们编码成文本特征，推理时也用同样的名字作为检测目标描述。所以名字要准确
+描述目标类别（例如 'People'、'Car'，别用 'class_0' 这种无意义字符串）。
+
+提示：如果你手头有 YOLOMM 数据集（含 X 模态），直接把它的 data.yaml 复制过来改
+路径即可用，YOLOVO 只读 RGB 部分，X 模态自动忽略，无需删减。
+
+--------------------------------------------------------------------------
+2.3  标注格式说明
+----------------------------------------------------------------------
+【目标检测】每行一个目标：
+    class cx cy w h
+  - class     类别 id（整数，0 起，对应 names 中的顺序）
+  - cx, cy    目标中心点 x, y（相对图像宽/高的归一化值，0~1）
+  - w, h      目标宽、高（同样归一化）
+
+【实例分割】每行一个目标，后跟多边形顶点坐标：
+    class x1 y1 x2 y2 x3 y3 ...
+  - 坐标均为归一化值（0~1），至少 3 个点，多边形需闭合
+
+【旋转框 OBB】每行一个目标，四个角点：
+    class x1 y1 x2 y2 x3 y3 x4 y4
+  - 坐标均为归一化值（0~1）
+
+【姿态 Pose】检测框后跟关键点：
+    class cx cy w h kx1 ky1 kv1 kx2 ky2 kv2 ...
+  - kx/ky 归一化，kv 为可见性（0/1/2，与 COCO 关键点约定一致）
+
+已有 .json（COCO 格式）或 .xml（VOC 格式）标注，需先用工具转换为 YOLO txt 格式。
+常见转换工具：labelImg、Roboflow、ultralytics 官方 convert 脚本等。
+
+--------------------------------------------------------------------------
+2.4  常见数据问题
+----------------------------------------------------------------------
+  Q: 报错标注找不到？
+  A: 检查图像与标注文件名是否一致（含大小写），目录名是否为 images/ 和 labels/。
+
+  Q: 用 YOLOMM 数据集时，X 模态图找不到会报错吗？
+  A: YOLOVO 只读 RGB 部分，不会加载 X 模态图。所以只要 images/ 目录和 labels/
+     齐全，即使没有 images_thermal/ 等 X 目录，YOLOVO 也能正常训练。
+
+  Q: 训练时类别数与 data.yaml 不一致？
+  A: 检查标注文件里 class id 是否超出 nc，names 里的顺序是否与 id 对应。
+
+  Q: 标注是 .json / .xml 怎么办？
+  A: 本项目只认 YOLO txt 格式。需先用工具转换。
+
+
+================================================================================
+第 3 章   怎 么 跑 实 验
+================================================================================
+
+本章是重点。按「训练 → 验证 → 推理」三步主线，外加「蒸馏 / 剪枝」等进阶脚本。
+每类脚本都给可改路径即运行的最小示例。
+
+--------------------------------------------------------------------------
+3.1  训练（train.py / train_seg.py / train_obb.py / train_pose.py）
+----------------------------------------------------------------------
+所有训练脚本结构相同：from ultralytics import YOLOVO → 加载 YAML →
+model.train(data=..., epochs=..., ...)。你只需改配置名 + data 路径 + 关键参数。
+
+【训练脚本清单】
+  脚本              任务        YAML 配置                 说明
+  ─────────────    ────────    ──────────────────────    ─────────────────────
+  train.py          检测        yolovo11n.yaml            主力脚本，开放词汇检测
+  train_seg.py      实例分割    yolovo11-seg.yaml         开放词汇实例分割
+  train_obb.py      旋转框      yolovo11n-obb.yaml        开放词汇旋转框
+  train_pose.py     姿态        yolovo11n-pose.yaml       开放词汇姿态估计
+
+以 train.py 为例（YOLOVO 检测，最常用）：
+
+    from ultralytics import YOLOVO
+    if __name__ == '__main__':
+        model = YOLOVO('yolovo11n.yaml')               # ← 模型配置名（见第 4 章如何换）
+        model.train(
+            data='<你的data.yaml路径>',                # ← 改成你的 data.yaml
+            epochs=100,                                # 训练轮数
+            batch=16,                                  # 批大小，显存不够就调小
+            imgsz=640,                                 # 输入尺寸
+            scale='n',                                 # ← 模型规模 n/s/m/l/x（见第 4 章）
+            device='0',                                # GPU 编号：'0'/'1'/... 或 '0,1' 多卡
+            cache=True,                                # 缓存数据集加速（内存<32G 改 False）
+            workers=8,                                 # 数据加载线程，Windows 改 0
+            lr0=5e-4,                                  # 初始学习率（推荐 1e-4 ~ 1e-3）
+            close_mosaic=10,                           # 最后 N 轮关闭 Mosaic
+            exist_ok=True,                             # 输出目录已存在时不新建带编号目录
+            project='runs/train',                      # 输出总目录
+            name='yolovo-detect',                      # 本次实验名
+            yolovo_debug=True,                         # 开启调试输出（可选）
+        )
+
+参数速查表（model.train 关键参数）：
+  参数          含义                               常用值
+  ────────     ─────────────────────────          ─────────────
+  data          data.yaml 路径                     必填
+  epochs        训练总轮数                          50~300
+  batch         批大小                             4/8/16/32（按显存）
+  imgsz         输入图像边长                        640
+  scale         模型规模                           n/s/m/l/x
+  device        GPU 编号                           '0' / '0,1'
+  cache         缓存数据                           True / 'disk' / False
+  workers       数据线程                           8（Win 用 0）
+  optimizer     优化器                             auto / SGD / AdamW
+  lr0 / lrf     初始/最终学习率                     推荐 lr0=1e-4 ~ 5e-4
+  project/name  输出目录                           结果落在 project/name/
+  exist_ok      目录重名处理                        True=覆盖同名目录
+  yolovo_debug  调试输出                           True / False
+
+
+--------------------------------------------------------------------------
+3.1.1  Alpha 调度配置（控制文本调制强度增长）
+--------------------------------------------------------------------------
+YOLOVO 通过 alpha 参数控制训练过程中文本特征的调制强度。Alpha 从 0 增长到 1，
+值越大文本信息权重越高。默认配置已针对训练稳定性优化（修复了 NaN loss 问题），
+大多数情况无需调整。
+
+【三种配置模式】
+
+1. 默认固定增速（推荐，无需配置）
+   不传任何参数，使用 alpha_speed=0.002 的固定增速：
+   
+   model.train(data='xxx.yaml', epochs=150)
+   # 150 轮结束时 alpha≈0.40，300 轮≈0.65，稳定且适合大多数场景
+
+2. 自定义固定增速（需要调快/调慢时）
+   通过 alpha_speed 参数控制每轮增长量：
+   
+   model.train(data='xxx.yaml', epochs=300, alpha_speed=0.003)
+   # 更快：300 轮结束时 alpha≈0.90，文本调制更充分
+   
+   model.train(data='xxx.yaml', epochs=150, alpha_speed=0.001)
+   # 更慢：150 轮结束时 alpha≈0.275，最大稳定性
+
+3. 自定义分段调度（高级，多阶段训练策略）
+   通过 alpha_schedule 参数设计分段线性增长：
+   
+   # 字典格式（推荐）
+   model.train(
+       data='xxx.yaml',
+       epochs=150,
+       alpha_schedule={
+           0.2: 0.15,   # 前 20% 轮数：慢速 warmup 到 0.15
+           0.6: 0.7,    # 20-60%：快速增长到 0.7
+           1.0: 1.0,    # 60-100%：平滑增长到 1.0
+       }
+   )
+   
+   # 或 list 格式
+   alpha_schedule=[(0.2, 0.15), (0.6, 0.7), (1.0, 1.0)]
+
+【何时需要调整】
+
+- 默认配置适合 90% 场景，训练稳定且不会 NaN
+- 需要更快增速：数据集很大（>10k 图）且训练轮数长（≥300）
+- 需要更慢增速：数据集很小（<1k 图）或模型容易过拟合文本
+- 需要分段调度：想实现"前期视觉主导、后期文本增强"等策略
+
+【常见问题】
+
+Q: 训练到 50/150 轮或 150/300 轮出现 NaN loss？
+A: 这是旧版 alpha 调度 bug（已修复）。更新到最新代码后使用默认配置即可。
+
+Q: Alpha 最终没到 1.0 会影响精度吗？
+A: 影响很小（<1% mAP）。Alpha=0.4 时文本信息已充分利用，达到 1.0 只是边际提升。
+   短周期训练（<200 轮）建议优先保证稳定性，不必强求 alpha=1.0。
+
+Q: 如何查看当前 alpha 值？
+A: 开启 yolovo_debug=True，训练日志会输出每轮 alpha 值。
+
+【示例脚本】
+项目根目录提供完整示例：examples_alpha_schedule.py
+包含默认/固定增速/分段调度的可视化演示和使用案例。
+
+提示：脚本顶部常有 os.environ["CUDA_VISIBLE_DEVICES"] = "0"，
+这是指定 GPU 的方式（也可改成 '1' 或 '0,1'）。
+
+--------------------------------------------------------------------------
+3.2  验证（val.py / val_seg.py / val_obb.py / val_pose.py）—— 看 mAP
+----------------------------------------------------------------------
+训练完成后，best.pt 在 project/name/weights/best.pt。用验证脚本加载权重并评测。
+
+【验证脚本清单】
+  val.py          检测验证
+  val_seg.py      实例分割验证
+  val_obb.py      旋转框验证
+  val_pose.py     姿态验证
+
+用法（编辑脚本里的权重路径 + data 路径）：
+
+    from ultralytics import YOLOVO
+    model = YOLOVO('runs/train/yolovo-detect/weights/best.pt')   # ← 改成你的训练权重路径
+    model.val(data='<你的data.yaml路径>',
+              imgsz=640,
+              batch=16,
+              workers=8,
+              project='runs/val', name='yolovo-val')
+
+验证会打印：每个类别的 P(精确率) / R(召回率) / mAP50 / mAP50-95，
+以及全部类别的平均值。详见第 5 章。
+
+--------------------------------------------------------------------------
+3.3  推理（predict.py / predict_seg.py / predict_obb.py / predict_pose.py）—— 看预测可视化
+----------------------------------------------------------------------
+推理脚本用开放词汇 API：用 source 指定图像，用 text 指定类别名列表。
+模型会根据文本提示在图像中检测对应类别的目标。
+
+【推理脚本清单】
+  predict.py          检测推理
+  predict_seg.py      实例分割推理
+  predict_obb.py      旋转框推理
+  predict_pose.py     姿态推理
+
+用法（编辑脚本里的路径即可）：
+
+    from ultralytics import YOLOVO
+    model = YOLOVO('runs/train/yolovo-detect/weights/best.pt')
+
+    # 类别名列表（开放词汇文本 prompt）
+    class_names = ['People', 'Car', 'Bus', 'Motorcycle', 'Lamp', 'Truck']
+
+    model.predict(
+        source='<图像路径或目录>',     # 单张图 / 目录 / 路径列表
+        text=class_names,              # 要检测的类别名
+        imgsz=640,
+        conf=0.25,                     # 置信度阈值
+        iou=0.45,                      # NMS IoU 阈值
+        save=True,                     # 保存可视化结果
+        project='runs/predict',
+        name='yolovo-predict',
+    )
+
+  source 可以是：单张图路径、一个目录、或一个路径列表（批量）。
+  text 是类别名字符串列表，模型会据此检测对应目标（开放词汇能力）。
+  save=True 会把画好框的结果图存到 project/name/ 下。
+
+批量推理（传路径列表）：
+    img_list = ['img1.jpg', 'img2.jpg', 'img3.jpg']
+    model.predict(source=img_list, text=['person', 'car'], save=True)
+
+--------------------------------------------------------------------------
+3.4  模型导出（YOLOVO API）
+----------------------------------------------------------------------
+YOLOVO 模型类自带 export 方法，可以导出为 ONNX / TorchScript / TensorRT 等格式。
+暂无独立导出脚本，可在 Python 中调用：
+
+    from ultralytics import YOLOVO
+    model = YOLOVO('runs/train/yolovo-detect/weights/best.pt')
+    model.export(format='onnx', imgsz=640)     # 导出 ONNX
+    # 或 format='engine' (TensorRT) / 'torchscript' / 'openvino'
+导出文件在权重同目录下。
+
+--------------------------------------------------------------------------
+3.5  进阶脚本（了解即可，按需使用）
+----------------------------------------------------------------------
+项目根目录还提供以下进阶脚本，初学者可暂不使用：
+
+  蒸馏：
+    trainVO_distill_feat.py      特征级知识蒸馏训练
+    trainVO_distill_output.py    输出级知识蒸馏训练
+    trainVO_distill_both.py      特征+输出联合蒸馏训练
+    train_teacher_yolovo_s.py    生成教师模型权重
+    distill_yolovo.yaml          蒸馏配置模板（先改 teachers[].weights）
+    tools/distill_config.py      交互生成/校验蒸馏 YAML
+
+  剪枝：
+    pruneVO.py                   结构化通道剪枝（也可改成稀疏/2:4）
+    finetrainVO.py               剪枝后微调（必须用 finetrain，不能用 train）
+
+  剪枝产物在 save_dir（默认 ./YOLOVO-pruned/）：
+    pruned.pt          后续微调/验证/推理用这个权重
+    pruned.yaml        剪后结构配置
+    prune_spec.json    逐单元决策与跳过原因
+    prune_report.json  引擎完整报告（save_report=True 时）
+
+  剪枝后的模型调用 train() 会报错，必须用 finetrain()，例如：
+    from ultralytics import YOLOVO
+    model = YOLOVO('./YOLOVO-pruned/pruned.pt')
+    model.finetrain(data='<你的data.yaml路径>', epochs=50, device='0')
+
+--------------------------------------------------------------------------
+3.6  最短上手路径（TL;DR）
+----------------------------------------------------------------------
+  1) 按 1.2/1.3 建好 Python 环境 + 装好依赖（含 timm），验证 torch.cuda 可用
+  2) 准备数据 + 写 data.yaml（第 2 章）
+  3) 改 train.py 里的 data 路径 + epochs → python train.py
+  4) 训练完改 val.py 里的权重路径 → python val.py（看 mAP）
+  5) 想看预测图 → 改 predict.py 里的路径 + text → python predict.py
+
+
+================================================================================
+第 4 章   怎 么 更 换 不 同 模 型 以 及 修 改
+================================================================================
+
+本章教你「换个模型 / 改个配置」。YOLOVO 模型由 YAML 配置文件定义，换模型就是换 YAML。
+
+--------------------------------------------------------------------------
+4.1  核心概念：YOLOVO 模型架构
+----------------------------------------------------------------------
+YOLOVO = YOLO11 视觉骨干 + MobileCLIP 文本塔 + 开放词汇检测头
+  - 视觉骨干：处理 RGB 图像，提取多尺度特征（P3/P4/P5）
+  - 文本塔（MobileCLIP）：把类别名编码成文本特征向量
+  - 视觉-文本融合模块（VCTE）：对齐视觉与文本特征
+  - 检测头（YOLOVODetect）：输出开放词汇检测结果
+
+YAML 配置分三段：backbone / text / head，各自定义网络结构。
+切换模型规模（n/s/m/l/x）由 scale 参数控制，YAML 无需改。
+
+--------------------------------------------------------------------------
+4.2  切换模型规模（n / s / m / l / x）
+----------------------------------------------------------------------
+模型大小由 scale 字母控制（depth/width 倍率）。规模越大越准也越慢越吃显存。
+
+切换方法（二选一）：
+  方法 1：改文件名字母。把配置名里的 n 换成 s，如 YOLOVO('yolovo11s.yaml')。
+           （框架会从文件名自动识别规模。）
+  方法 2：用 model_scale 参数显式指定：
+           model.train(data=..., model_scale='s')
+
+  【重要易错点】注意区分两个同名参数：
+    - train() 里的 scale='n'  —— 在本项目训练脚本里指【模型规模】
+    - ultralytics 配置里的 scale（图像缩放增强）—— 是【数据增强】参数
+  为避免混淆，改模型大小时优先用 model_scale= 这个名字。
+
+--------------------------------------------------------------------------
+4.3  切换任务（检测 / 实例分割 / 旋转框 / 姿态）
+----------------------------------------------------------------------
+换任务 = 换带对应检测头的 YAML + 用对应训练脚本：
+  检测 detect     yolovo11n.yaml          + train.py
+  实例分割 seg    yolovo11-seg.yaml       + train_seg.py
+  旋转框 obb      yolovo11n-obb.yaml      + train_obb.py
+  姿态 pose       yolovo11n-pose.yaml     + train_pose.py
+不同任务的差别主要在【最后一层检测头】
+（YOLOVODetect / YOLOVOSegment / YOLOVOOBB / YOLOVOPose）。
+
+--------------------------------------------------------------------------
+4.4  替换网络模块（注意力 / 特征提取 / 颈部 / Mamba）
+----------------------------------------------------------------------
+项目在 ultralytics/cfg/models/yolovo/ 下准备了大量「换好某个模块」的现成配置，
+直接拿来用即可，无需自己写代码：
+
+  子目录          替换内容                     示例文件
+  ────────       ──────────────────          ──────────────────────────────────
+  (根目录)        基准模型                     yolovo11.yaml / yolovo11-seg.yaml / yolovo11-obb.yaml / yolovo11-pose.yaml
+  attention/      注意力模块                   yolovo11n-attn-cbsa.yaml
+  extraction/     特征提取模块                 yolovo11n-c3k2_faster.yaml
+  neck/           颈部结构                     yolovo11n-slimneck.yaml
+  mamba/          Mamba/SSM 模块               yolovo11n-mamba-vss.yaml
+
+用法：把训练脚本里的 model 配置名换成对应文件名即可，例如想试 CBSA 注意力：
+    model = YOLOVO('yolovo11n-attn-cbsa.yaml')
+
+--------------------------------------------------------------------------
+4.5  新增 / 自定义模块（进阶）
+----------------------------------------------------------------------
+如果想加入论文里的新模块，严格按项目内置规范文档操作：
+    ultralytics/nn/MODULE_ADDING_GUIDE.md   （模块添加规范指南）
+
+5 步流程：
+  1) 写模块代码到对应目录（注意力→nn/attention/、特征提取→nn/extraction/、
+     颈部→nn/Neck/、通用→nn/public/ 等），文件内声明 __all__。
+  2) 在该目录的 __init__.py 里导出并加入 __all__。
+  3) 在 ultralytics/nn/tasks.py 注册模块（导入 + try/except 兜底）。
+  4) 在 tasks.py 的 parse_model() 里给新模块加通道处理分支（elif m is YourModule:），
+     从 ch[f] 取实际通道，切勿直接用 args[0]。
+  5) 写 YAML 配置放到 cfg/models/yolovo/... 下，即可用 YOLOVO('xxx.yaml') 调用。
+
+
+================================================================================
+第 5 章   怎 么 查 看 指 标
+================================================================================
+
+训练/验证的产物都在 project/name/ 目录下（默认 runs/train/<实验名>/）。
+
+--------------------------------------------------------------------------
+5.1  训练输出目录里有什么
+----------------------------------------------------------------------
+  文件                          内容 / 用途
+  ──────────────────────────   ──────────────────────────────────────
+  weights/best.pt               最优权重（按 mAP50-95 选出），推理用它
+  weights/last.pt               最后一轮权重，可用于断点续训
+  results.csv                   每个 epoch 一行的指标表（最重要）
+  results.png                   训练曲线图（损失 + mAP + 学习率）
+  confusion_matrix.png          混淆矩阵（看哪些类易混淆）
+  args.yaml                     本次训练所有参数快照（复现实验用）
+  val_batch*_labels.jpg         验证集真值可视化
+  val_batch*_pred.jpg           验证集预测可视化
+
+--------------------------------------------------------------------------
+5.2  标准 val 指标（model.val 打印的）
+----------------------------------------------------------------------
+val.py 等脚本运行后，终端会打印一张表，列为：
+    Class | Images | Instances | Box(P | R | mAP50 | mAP50-95)
+
+含义：
+  P           精确率 Precision
+  R           召回率 Recall
+  mAP50       IoU=0.5 时的平均精度
+  mAP50-95    IoU 从 0.5 到 0.95（步长 0.05）的平均精度（检测任务主要看这个）
+每个类别一行，最后一行 all 是全部类别平均。看「all」行的 mAP50-95 即可横向比较模型。
+
+--------------------------------------------------------------------------
+5.3  读 results.csv 看训练曲线
+----------------------------------------------------------------------
+用 Excel / WPS / pandas 打开 results.csv，主要列：
+  epoch                              轮次
+  train/box_loss, train/cls_loss,    训练损失（越低越好）
+  train/dfl_loss
+  metrics/precision(B), recall(B)    验证精确率/召回率
+  metrics/mAP50(B), mAP50-95(B)      验证 mAP（越高越好，主要看这两列）
+  val/box_loss, val/cls_loss, ...    验证损失
+  lr/pg0, lr/pg1, lr/pg2             各参数组学习率
+最后一行 = 最后一轮。直接看 results.png 也能直观看到曲线趋势。
+
+判断训练好坏的经验：
+  - mAP50-95 持续上升并平稳 → 训练正常
+  - 训练损失下降但验证 mAP 不升甚至下降 → 过拟合，考虑加数据 / 早停 / 减规模
+  - mAP 一直很低 → 检查 data.yaml 的 nc/names、标注质量、类别名是否能被文本塔良好编码
+
+--------------------------------------------------------------------------
+5.4  推荐指标查看工作流
+----------------------------------------------------------------------
+  1) python val.py        → 终端看 all 行的 mAP50 / mAP50-95（快速判断）
+  2) 打开 results.png     → 看训练曲线是否健康
+  3) 打开 confusion_matrix.png → 看类别间误检情况，针对性改进
+  4) python predict.py    → 人眼抽检预测框是否合理
+
+
+================================================================================
+附 录：脚本速查总表
+================================================================================
+
+【训练】
+  train.py           YOLOVO 检测
+  train_seg.py       YOLOVO 实例分割
+  train_obb.py       YOLOVO 旋转框
+  train_pose.py      YOLOVO 姿态
+
+【验证】
+  val.py             YOLOVO 检测验证
+  val_seg.py         YOLOVO 实例分割验证
+  val_obb.py         YOLOVO 旋转框验证
+  val_pose.py        YOLOVO 姿态验证
+
+【推理】
+  predict.py         YOLOVO 检测推理（source + text 开放词汇）
+  predict_seg.py     YOLOVO 实例分割推理
+  predict_obb.py     YOLOVO 旋转框推理
+  predict_pose.py    YOLOVO 姿态推理
+
+【蒸馏 / 剪枝 / 进阶】
+  trainVO_distill_feat.py       特征级知识蒸馏
+  trainVO_distill_output.py     输出级知识蒸馏
+  trainVO_distill_both.py       联合蒸馏
+  train_teacher_yolovo_s.py     生成教师模型权重
+  distill_yolovo.yaml           蒸馏配置模板
+  tools/distill_config.py       交互生成蒸馏 YAML
+  pruneVO.py                    结构化通道剪枝
+  finetrainVO.py                剪枝后微调
+
+
+================================================================================
+如遇到本指南未覆盖的问题，请把以下信息提供给技术支持：
+  1) 你运行的具体命令 / 脚本名
+  2) data.yaml 内容（可隐去绝对路径）
+  3) 完整报错信息（终端最后 20~30 行）
+  4) nvidia-smi 输出、python --version 输出、以及
+     python -c "import torch,numpy;print(torch.__version__,torch.cuda.is_available(),numpy.__version__)" 的输出
+================================================================================

@@ -1,0 +1,26 @@
+# M3FD多模态数据集配置文件
+# 多模态目标检测数据集 - RGB + 边缘
+
+# 数据集路径
+path: /home/zhizi/work/multimodel/datasets/M3FD_split  # 数据集根目录（使用绝对路径）
+train: ./images/train  # 训练集RGB图像路径（相对于path）
+val: ./images/val      # 验证集RGB图像路径
+test: ./images/test    # 测试集RGB图像路径
+
+# 多模态路径配置
+modality:
+  rgb: images         # RGB可见光图像模态路径
+  edge: images_edge   # 边缘图像模态路径
+
+# 当前使用的模态组合
+modality_used: ["rgb", "edge"]  # 本次训练使用的模态：RGB + 边缘
+
+Xch: 1
+# 类别信息
+names:
+  0: People
+  1: Car
+  2: Bus
+  3: Motorcycle
+  4: Lamp
+  5: Truck

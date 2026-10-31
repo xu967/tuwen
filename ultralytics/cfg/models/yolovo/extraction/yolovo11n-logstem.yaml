@@ -1,0 +1,48 @@
+# Ultralytics AGPL-3.0 License - https://ultralytics.com/license
+# YOLOVO11n with LoGStem - Open-vocabulary multimodal detection model
+# LoGStem (Laplacian-of-Gaussian Stem) replaces Conv[64]+Conv[128] with 4x downsampling
+# Core strategy: LoGStem provides edge-enhanced 4x downsampling as the stem
+
+nc: 80
+text_encoder:
+  name: mobileclip_s0
+  dim: 512
+
+scales:
+  n: [0.50, 0.25, 1024]
+
+backbone:
+  - [-1, 1, LoGStem, [64]]                 # 0 - P2/4 LoGStem stem (4x downsample, replaces Conv+Conv)
+  - [-1, 2, C3k2, [256, False, 0.25]]      # 1
+  - [-1, 1, Conv, [256, 3, 2]]             # 2 - P3/8
+  - [-1, 2, C3k2, [512, False, 0.25]]      # 3 - P3
+  - [-1, 1, Conv, [512, 3, 2]]             # 4 - P4/16
+  - [-1, 2, C3k2, [512, True]]             # 5 - P4
+  - [-1, 1, Conv, [1024, 3, 2]]            # 6 - P5/32
+  - [-1, 2, C3k2, [1024, True]]            # 7
+  - [-1, 1, SPPF, [1024, 5]]               # 8
+  - [-1, 2, C2PSA, [1024]]                 # 9 - P5
+
+text:
+  - [-1, 1, VCTETextInput, [], "text"]       # 10 - text input socket
+  - [10, 1, VCTETextAdapter, []]             # 11 - text adapter
+  - [9, 1, VCTEVisualAdapter, []]            # 12 - visual context from backbone (C2PSA=9)
+  - [[11, 12], 1, VCTETextEnhancer, []]      # 13 - text-visual fusion
+
+head:
+  - [9, 1, nn.Upsample, [None, 2, "nearest"]]     # 14 - upsample from P5
+  - [[-1, 5], 1, Concat, [1]]                      # 15 - concat with P4(5)
+  - [-1, 2, C3k2, [512, False]]                    # 16
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]     # 17
+  - [[-1, 3], 1, Concat, [1]]                      # 18 - concat with P3(3)
+  - [-1, 2, C3k2, [256, False]]                    # 19 - P3
+  - [-1, 1, Conv, [256, 3, 2]]                     # 20
+  - [[-1, 16], 1, Concat, [1]]                     # 21
+  - [-1, 2, C3k2, [512, False]]                    # 22 - P4
+  - [-1, 1, Conv, [512, 3, 2]]                     # 23
+  - [[-1, 9], 1, Concat, [1]]                      # 24 - concat with P5(9)
+  - [-1, 2, C3k2, [1024, True]]                    # 25 - P5
+  - [[19, 13], 1, VCTENeckModulator, []]           # 26 - enhanced P3
+  - [[22, 13], 1, VCTENeckModulator, []]           # 27 - enhanced P4
+  - [[25, 13], 1, VCTENeckModulator, []]           # 28 - enhanced P5
+  - [[26, 27, 28, 13], 1, YOLOVODetect, []]        # 29 - open-vocab detection head

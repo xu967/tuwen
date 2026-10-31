@@ -1,0 +1,30 @@
+# YOLOVO 蒸馏配置模板（v1）
+# 使用前把 teachers[].weights 改成你的教师 .pt 路径。
+# 也可用 python tools/distill_config.py 交互生成。
+#
+# YOLOVO v1 约束：
+# - 教师只支持 role: rgb
+# - feature 映射必须写显式 student_layer，不支持 student_input 自动分支
+# - 下列 27/28/29 对应 yolovo11.yaml 中三路 VCTENeckModulator（增强后的 P3/P4/P5）
+
+version: 1
+
+teachers:
+  - name: teacher_yolovo_s
+    role: rgb
+    weights: path/to/teacher_yolovo_s.pt
+    yaml: ultralytics/cfg/models/yolovo/yolovo11.yaml
+
+mappings:
+  feature:
+    - teacher: teacher_yolovo_s
+      teacher_layer: 27
+      student_layer: 27
+    - teacher: teacher_yolovo_s
+      teacher_layer: 28
+      student_layer: 28
+    - teacher: teacher_yolovo_s
+      teacher_layer: 29
+      student_layer: 29
+  output:
+    - teacher: teacher_yolovo_s

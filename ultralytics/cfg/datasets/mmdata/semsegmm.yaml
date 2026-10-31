@@ -1,0 +1,32 @@
+path: /path/to/dataset
+train: images/train
+val: images/val
+test: images/test
+
+modality:
+  rgb: images
+  ir: images_ir
+
+modality_used: ["rgb", "ir"]
+Xch: 1
+ignore_index: 255
+
+names:
+  0: background
+  1: tree
+
+# Optional: label_mapping maps raw pixel values in mask files to target class IDs.
+# When not declared, pixel values are used directly as class IDs (identity mapping).
+# Mapping value can be an integer (target class ID) or null/255 to map to ignore_index.
+#
+# Example (8-class dataset with void class):
+#   label_mapping:
+#     0: 255       # void -> ignore
+#     1: 0         # road -> class 0
+#     2: 1         # sidewalk -> class 1
+#     3: 2         # building -> class 2
+#     4: 3         # wall -> class 3
+#     5: 4         # fence -> class 4
+#     6: 5         # pole -> class 5
+#     7: 6         # vegetation -> class 6
+#     8: 7         # sky -> class 7

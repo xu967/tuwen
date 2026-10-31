@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "include": [
+    "GenRelated.py",
+    "finetrainVO.py",
+    "predictOvrel.py",
+    "predict_obb.py",
+    "predict_pose.py",
+    "predict_seg.py",
+    "pruneVO.py",
+    "trainOVrel.py",
+    "trainVO_distill_both.py",
+    "trainVO_distill_feat.py",
+    "trainVO_distill_output.py",
+    "train_obb.py",
+    "train_pose.py",
+    "train_seg.py",
+    "train_teacher_yolovo_s.py",
+    "valOvrel.py",
+    "val_obb.py",
+    "val_pose.py",
+    "val_seg.py"
+  ],
+  "exclude": [
+    "finetrainMM.py",
+    "pruneMM.py",
+    "test_yolomm_complexity_head_flops.py",
+    "trainMM_distill_feat.py",
+    "trainMM_distill_output.py",
+    "train_teacher_s.py",
+    "valOVrel.py",
+    "val_coco_segpose_test.py"
+  ]
+}

@@ -1,0 +1,22 @@
+# OBB Dataset Configuration
+# Multi-modal: RGB + SAR
+# Format: Oriented Bounding Box (OBB)
+
+# Dataset paths
+path: /home/zhizi/work/multimodel/ultralyticmm/datasets/obb
+train: images/train
+val: images/test  # 使用test作为验证集
+
+Xch: 3
+# Multi-modal configuration
+modalities:
+  rgb: images
+  sar: images_sar
+
+modality_used: ["rgb",'sar']
+
+# Classes
+names:
+  0: bridge
+  1: harbor
+  2: storage_tank

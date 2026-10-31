@@ -1,0 +1,69 @@
+seed: 42
+num_workers: 24
+paths:
+  psg_json: data/psg/psg_train_val.json
+  images: data/coco/images
+  coco: data/coco
+  cache: data/barv_cache_2k_new2
+  runs: runs/barv/integration_2k_v4
+data:
+  predicates:
+  - holding
+  - carrying
+  - wearing
+  - sitting on
+  - standing on
+  - riding
+  - touching
+  - leaning on
+  - lying on
+  audit_images: 2000
+  min_instance_px: 64
+  max_negs_per_pred_image: 3
+  max_negs_per_image: 6
+  neg_gap_floor_px: 10
+  neg_gap_p99_margin_px: 6
+  max_neg_pos_ratio: 4
+  min_neg_per_pred: 50
+split:
+  train_core: 0.72
+  train_teacher: 0.08
+  dev: 0.08
+  calib: 0.06
+  test: 0.06
+model:
+  backbone: resnet18
+  pretrained: true
+  coarse_size: 320
+  full_size: 640
+  fine_size: 224
+  pred_dim: 64
+  hidden: 512
+  state_dim: 256
+runtime:
+  max_steps: 1
+  min_area_frac: 0.002
+  max_area_frac: 0.7
+  stop_margin: 0.0
+  abstain_coverage: 0.85
+  random_seed: 7
+train:
+  relation_epochs: 15
+  relation_batch: 4096
+  relation_lr: 0.001
+  relation_wd: 0.01
+  patience: 5
+  value_epochs: 20
+  value_batch: 8192
+  value_lr: 0.001
+  value_wd: 0.01
+  teacher_max_queries: 60000
+  lambda_cost: 0.02
+  n_bootstrap: 500
+  update_epochs: 10
+hardware:
+  amp: true
+  prep_batch: 24
+  coarse_batch: 64
+  fine_batch: 256
+  train_device: cuda:0

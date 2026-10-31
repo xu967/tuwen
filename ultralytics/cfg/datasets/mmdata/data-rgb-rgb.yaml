@@ -1,0 +1,21 @@
+# RGB+RGB 双模态测试配置 - X模态也是RGB
+path: /mnt/SSD/work/multimodel/datasets/M3FD_split
+train: ./images/train
+val: ./images/val
+test: ./images/test
+
+modality:
+  rgb: images
+  ir: images_ir
+  depth: images_depth
+
+modality_used: ["rgb", "rgb"]
+Xch: 3
+
+names:
+  0: People
+  1: Car
+  2: Bus
+  3: Motorcycle
+  4: Lamp
+  5: Truck

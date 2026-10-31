@@ -1,0 +1,22 @@
+# IR+Depth 测试配置 - primary=IR, X=depth
+path: /mnt/SSD/work/multimodel/datasets/M3FD_split
+train: ./images_ir/train
+val: ./images_ir/val
+test: ./images_ir/test
+
+modality:
+  ir: images_ir
+  depth: images_depth
+  rgb: images
+
+modality_used: ["ir", "depth"]
+Xch: 3
+primary_modality: ir
+
+names:
+  0: People
+  1: Car
+  2: Bus
+  3: Motorcycle
+  4: Lamp
+  5: Truck

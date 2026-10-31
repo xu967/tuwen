@@ -1,0 +1,23 @@
+# 多模态目标检测数据集 - RGB + 红外
+# 数据集路径
+path: /mnt/SSD/work/multimodel/ultralyticmm/datasets/tree_seg
+train: ./images/train  # 训练集RGB图像路径（相对于path）
+val: ./images/val      # 验证集RGB图像路径
+test: ./images/test    # 测试集RGB图像路径
+
+# 多模态路径配置
+modality:
+  rgb: images      # RGB可见光图像模态路径
+  ir: images_ir    # 红外图像模态路径
+  depth: images_depth  # 深度图模态路径
+
+# 当前使用的模态组合
+modality_used: ["rgb",'ir']  # 本次训练使用的模态：RGB + 红外
+
+# 类别信息
+names:
+  0: tree
+
+
+
+

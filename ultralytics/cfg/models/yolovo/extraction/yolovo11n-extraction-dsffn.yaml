@@ -1,0 +1,50 @@
+# Ultralytics AGPL-3.0 License - https://ultralytics.com/license
+# YOLOVO11n with DualScaleGatedFFN extraction
+# DualScaleGatedFFN inserted after SPPF, before C2PSA (same-channel block)
+# Architecture: YOLO11 backbone + DualScaleGatedFFN + VCTE + YOLOVODetect
+
+nc: 80
+text_encoder:
+  name: mobileclip_s0
+  dim: 512
+
+scales:
+  n: [0.50, 0.25, 1024]
+
+backbone:
+  - [-1, 1, Conv, [64, 3, 2]]              # 0 - stem
+  - [-1, 1, Conv, [128, 3, 2]]             # 1
+  - [-1, 2, C3k2, [256, False, 0.25]]      # 2
+  - [-1, 1, Conv, [256, 3, 2]]             # 3
+  - [-1, 2, C3k2, [512, False, 0.25]]      # 4
+  - [-1, 1, Conv, [512, 3, 2]]             # 5
+  - [-1, 2, C3k2, [512, True]]             # 6
+  - [-1, 1, Conv, [1024, 3, 2]]            # 7
+  - [-1, 2, C3k2, [1024, True]]            # 8
+  - [-1, 1, SPPF, [1024, 5]]               # 9
+  - [-1, 1, DualScaleGatedFFN, []]         # 10 - extraction
+  - [-1, 2, C2PSA, [1024]]                 # 11
+
+text:
+  - [-1, 1, VCTETextInput, [], "text"]       # 12
+  - [12, 1, VCTETextAdapter, []]             # 13
+  - [11, 1, VCTEVisualAdapter, []]           # 14
+  - [[13, 14], 1, VCTETextEnhancer, []]      # 15
+
+head:
+  - [11, 1, nn.Upsample, [None, 2, "nearest"]]    # 16
+  - [[-1, 6], 1, Concat, [1]]                      # 17
+  - [-1, 2, C3k2, [512, False]]                    # 18
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]     # 19
+  - [[-1, 4], 1, Concat, [1]]                      # 20
+  - [-1, 2, C3k2, [256, False]]                    # 21 - P3
+  - [-1, 1, Conv, [256, 3, 2]]                     # 22
+  - [[-1, 18], 1, Concat, [1]]                     # 23
+  - [-1, 2, C3k2, [512, False]]                    # 24 - P4
+  - [-1, 1, Conv, [512, 3, 2]]                     # 25
+  - [[-1, 11], 1, Concat, [1]]                     # 26
+  - [-1, 2, C3k2, [1024, True]]                    # 27 - P5
+  - [[21, 15], 1, VCTENeckModulator, []]           # 28
+  - [[24, 15], 1, VCTENeckModulator, []]           # 29
+  - [[27, 15], 1, VCTENeckModulator, []]           # 30
+  - [[28, 29, 30, 15], 1, YOLOVODetect, []]        # 31
