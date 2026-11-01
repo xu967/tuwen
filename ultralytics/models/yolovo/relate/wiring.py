@@ -114,7 +114,7 @@ def resolve_from(model, inputs) -> List[Dict[str, Any]]:
     return resolved
 
 
-def attach_relate_layer(model, inputs, rnames: Dict[int, str], field_cfg=None):
+def attach_relate_layer(model, inputs, rnames: Dict[int, str], field_cfg=None, obj_names=None):
     """两步构建的第二步：程序化追加 YOLOVORelate（RA 结构）到一级模型。
 
     追加后模型 save 列表补一级头输出层号；relate_info 写入 model 属性。
@@ -146,8 +146,9 @@ def attach_relate_layer(model, inputs, rnames: Dict[int, str], field_cfg=None):
         feat_channels=_primary_feat_channels(head, from_resolved),
         field_cfg=field_cfg,
     )
-    # 词表 + 类别名嵌入：谓词 W；类别 W_obj 用同一 MobileCLIP 塔
-    W_obj = _encode_class_names(model)
+    # 词表 + 类别名嵌入：谓词 W；类别 W_obj 用同一 MobileCLIP 塔。
+    # obj_names 来自 data yaml 的 names（RA-4M 497 类 ≠ 一级模型的 20/80 类）。
+    W_obj = _encode_class_names(model, obj_names)
     rel.install_vocabulary([rnames_norm[i] for i in sorted(rnames_norm)], W, W_obj)
     # 程序化追加簿记（对照 parse_model 行为）
     head_idx = len(model.model) - 1  # 一级头当前是最后一层（两步构建前提）
@@ -201,9 +202,9 @@ def _primary_feat_channels(head, from_resolved) -> Optional[List[int]]:
 
 
 @torch.no_grad()
-def _encode_class_names(model) -> Optional[torch.Tensor]:
+def _encode_class_names(model, names=None) -> Optional[torch.Tensor]:
     """类别名经同一 MobileCLIP 塔编码 → W_obj [n_cls, text_dim]（Q2 对齐损失用）。"""
-    names = getattr(model, "names", None)
+    names = names or getattr(model, "names", None)
     if not names:
         return None
     cls_list = [names[k] for k in sorted(names)] if isinstance(names, dict) else list(names)
@@ -231,7 +232,8 @@ def encode_predicate_bank(model, rnames: Dict[int, str]):
                 texts.append(t.format(rnames[pid]))
                 owner.append((pid, len(TRAIN_TEMPLATES)))
         texts.append(_TRIPWIRE_STRING)
-        emb = model.encode_text(texts)  # [K+1, D] normalized
+        # 分批编码：RA-4M 的 10,370 谓词 × 3 模板一次进塔会 OOM。
+        emb = torch.cat([model.encode_text(texts[i:i + 512]) for i in range(0, len(texts), 512)])
         if not torch.is_tensor(emb):
             emb = torch.tensor(emb)
         trip = emb[-1]
@@ -287,6 +289,22 @@ def resolve_rnames(rnames_override: Any = None, data_yaml: Union[str, dict, None
     if "rnames" not in (data or {}):
         raise ValueError(f"{data_yaml} 缺少 rnames 键（谓词词表）。")
     return parse_rnames(data["rnames"])
+
+
+def resolve_objnames(data_yaml: Union[str, dict, None] = None) -> Optional[List[str]]:
+    """data yaml 的 ``names`` → W_obj 类别词表；缺省则沿用一级模型 names。"""
+    if data_yaml is None:
+        return None
+    if isinstance(data_yaml, str):
+        from ultralytics.utils import YAML
+
+        data = YAML.load(data_yaml)
+    else:
+        data = data_yaml
+    names = (data or {}).get("names")
+    if not names:
+        return None
+    return [names[k] for k in sorted(names)] if isinstance(names, dict) else [str(n) for n in names]
 
 
 def load_relate_info(ckpt: Any) -> Optional[Dict]:

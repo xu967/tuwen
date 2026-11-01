@@ -33,7 +33,8 @@ class RelateNamespace:
     def _build_relate_model(self, inputs, rnames_override=None, data_yaml=None,
                             field_cfg=None):
         """两步构建：加载的一级模型 + 程序化追加 YOLOVORelate。"""
-        from ultralytics.models.yolovo.relate.wiring import attach_relate_layer, resolve_rnames
+        from ultralytics.models.yolovo.relate.wiring import (
+            attach_relate_layer, resolve_objnames, resolve_rnames)
 
         model = self._parent.model
         # 已带关系层（继续训练场景）：复用；若显式要求不同的 field 配置则 fail-fast，
@@ -49,7 +50,8 @@ class RelateNamespace:
                         "请从一级权重重新 attach。")
             return model
         rnames = resolve_rnames(rnames_override, data_yaml)
-        attach_relate_layer(model, inputs, rnames, field_cfg=field_cfg)
+        attach_relate_layer(model, inputs, rnames, field_cfg=field_cfg,
+                            obj_names=resolve_objnames(data_yaml))
         return model
 
     # ------------------------------------------------------------------ train

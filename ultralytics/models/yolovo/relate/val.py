@@ -591,6 +591,10 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
         s = ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}" for k, v in self.rel_stats.items())
         LOGGER.info(f"[RelateVal] {s}")
 
+    def get_desc(self) -> str:
+        """验证进度条表头：父类写死 Box(P/R/mAP50/mAP50-95)，关系验证既不算也不打印这些列。"""
+        return "%22s" % "RelationVal (R@K / mR@K / F1@50 / ExAP)"
+
     # ---- 检测侧全部置空 --------------------------------------------------
 
     def _prepare_batch(self, si, batch):

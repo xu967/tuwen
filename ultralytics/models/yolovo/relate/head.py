@@ -332,25 +332,24 @@ class YOLOVORelate(nn.Module):
 
     # --------------------------------------------------------- full compute
 
-    def _compute(self, base: torch.Tensor, boxes_b: torch.Tensor,
-                 gt_list: Optional[List[List[Tuple[int, int, int]]]] = None,
-                 eval_budget: Optional[int] = None,
-                 box_cls: Optional[torch.Tensor] = None,
-                 field_ablate: Optional[str] = None):
-        """Shared train/eval pipeline over one image.
-
-        boxes_b [1, N, 4] normalised cxcywh; gt_list per-image triples.
-        Returns dict with indices, logits, and (train) the seven loss terms.
-        """
-        F_map = self._fmap(base)                              # [1,h,w,768]
+    def _forward_pairs(self, base: torch.Tensor, boxes_b: torch.Tensor,
+                       box_counts: Optional[torch.Tensor] = None,
+                       gt_list: Optional[List[List[Tuple[int, int, int]]]] = None,
+                       eval_budget: Optional[int] = None,
+                       field_ablate: Optional[str] = None):
+        """Batched pair pipeline (no losses). ``box_counts [B]`` marks the valid
+        prefix of each padded box row, so batches of variable-size images share
+        one forward instead of B per-image calls."""
+        F_map = self._fmap(base)                              # [B,h,w,768]
         B, h, w, _ = F_map.shape
         N = boxes_b.shape[1]
+        device = boxes_b.device
 
-        v_obj = self.spatial_pool(F_map, boxes_b)             # [1,N,768]
+        v_obj = self.spatial_pool(F_map, boxes_b)             # [B,N,768]
         is_gt = labels = None
         training = gt_list is not None
         if training:
-            is_gt, labels = _gt_grid(gt_list, B, N, boxes_b.device)
+            is_gt, labels = _gt_grid(gt_list, B, N, device)
             if self.sampler.swap_include:
                 swapped = is_gt.reshape(B, N, N).transpose(1, 2).reshape(B, N * N)
                 force = is_gt | swapped
@@ -370,14 +369,14 @@ class YOLOVORelate(nn.Module):
                 self.sampler.geo_budget = budget
                 self.sampler.final_budget = budget
             sub_idx, obj_idx, valid_mask, pred_labels, rel_logits = self.sampler(
-                boxes_b, v_obj, is_gt=force, flat_labels=labels)
+                boxes_b, v_obj, box_counts=box_counts, is_gt=force, flat_labels=labels)
         finally:
             if saved is not None:
                 self.sampler.geo_budget = saved
                 self.sampler.final_budget = saved_final
 
         K = sub_idx.shape[1]
-        B_idx = torch.arange(B, device=boxes_b.device).unsqueeze(1).expand(B, K)
+        B_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, K)
         sub_boxes_k = boxes_b[B_idx, sub_idx]
         obj_boxes_k = boxes_b[B_idx, obj_idx]
         v_sub = v_obj[B_idx, sub_idx]
@@ -396,17 +395,16 @@ class YOLOVORelate(nn.Module):
         v_pool = self.spatial_pool(F_map, pool_boxes)
         v_union, v_contact = v_pool[:, :K], v_pool[:, K:]
 
-        geo_feat = self.geo_encoder(sub_boxes_k, obj_boxes_k)   # [1,K,19->d?]
         # RelGeomEncoder returns features when called with .features; the module
         # call projects to d_model — we need BOTH: raw 19 for spa_proj, projected
         # for pair input. Use the static features + own MLP-consistent projection:
-        geo19 = RelGeomEncoder.features(sub_boxes_k, obj_boxes_k)  # [1,K,19]
-        geo_d = self.geo_encoder(sub_boxes_k, obj_boxes_k)         # [1,K,d_model]
+        geo19 = RelGeomEncoder.features(sub_boxes_k, obj_boxes_k)  # [B,K,19]
+        geo_d = self.geo_encoder(sub_boxes_k, obj_boxes_k)         # [B,K,d_model]
 
         pair_input = torch.cat([v_sub, v_obj_k, v_union, v_contact, geo_d], dim=-1)
         pair_feat = self.pair_proj(pair_input)
 
-        box_tokens = self.box_prompt_encoder.encode_pairs(sub_xy, obj_xy)  # [1,K,4,d]
+        box_tokens = self.box_prompt_encoder.encode_pairs(sub_xy, obj_xy)  # [B,K,4,d]
         padding_mask = ~valid_mask
         r = self.rel_transformer(pair_feat, F_map, box_tokens=box_tokens,
                                  pair_padding_mask=padding_mask)
@@ -417,22 +415,31 @@ class YOLOVORelate(nn.Module):
         r = self.rel_interaction(r, scene_flat, query_padding_mask=padding_mask,
                                  grid_hw=(h, w))
 
+        # 七项损失复用：整批算一次 N×N 几何打分与 f_sub/f_obj，逐图损失不再各自重算。
+        geo_scores = self.sampler.geo_scorer(RelGeomEncoder.features(
+            boxes_b.unsqueeze(2).expand(B, N, N, 4),
+            boxes_b.unsqueeze(1).expand(B, N, N, 4)).reshape(B, N * N, NUM_GEO)).squeeze(-1)
+        zs, zo = self.sampler.f_sub(v_obj), self.sampler.f_obj(v_obj)
+
         g = self.compose_gate
         q = self.compose_norm(self.vocab_head.proj(r)
                               + g[0] * self.sub_text_proj(v_sub)
                               + g[1] * self.obj_text_proj(v_obj_k))
         q_spa = self.spa_proj(torch.cat([r, geo19], dim=-1))
-        logits = self.vocab_head.score_query_dual(q, q_spa)     # [1,K,V]
+        logits = self.vocab_head.score_query_dual(q, q_spa)     # [B,K,V]
 
-        cand = field_out = cos_m = delta = None
+        out = {"sub_idx": sub_idx, "obj_idx": obj_idx, "valid_mask": valid_mask,
+               "rel_logits": rel_logits, "logits": logits, "v_obj": v_obj,
+               "boxes": boxes_b, "n_boxes": N, "q": q, "q_spa": q_spa,
+               "geo19": geo19, "is_gt": is_gt, "labels": labels, "force": force,
+               "box_counts": box_counts, "geo_scores": geo_scores, "zs": zs, "zo": zo}
         if self.field_read is not None:
             if self.vocab_head.W.device != logits.device:
                 self.vocab_head.W = self.vocab_head.W.to(logits.device)
                 self.vocab_head.alpha = self.vocab_head.alpha.to(logits.device)
             V = self.vocab_head.W.shape[0]
             m = min(int(self.field_cfg.n_candidates), V)
-            gtp = pred_labels[0] if pred_labels is not None else None
-            cand = self._select_candidates(logits, gtp, valid_mask[0], m, training)
+            cand = self._select_candidates(logits, pred_labels, valid_mask, m, training)
             e_cand = self.vocab_head.W[cand]
             if field_ablate == "agnostic":
                 e_cand = e_cand.mean(dim=2, keepdim=True).expand_as(e_cand)
@@ -444,38 +451,65 @@ class YOLOVORelate(nn.Module):
             q_f = q.unsqueeze(2) + self.q_res_proj(delta)
             q_spa_f = q_spa.unsqueeze(2) + self.q_res_proj(delta)
             cos_m, logit_m = self.vocab_head.score_candidates(q_f, q_spa_f, cand)
-            logits = logits.scatter(-1, cand, logit_m.to(logits.dtype))
-
-        out = {"sub_idx": sub_idx[0], "obj_idx": obj_idx[0], "valid_mask": valid_mask[0],
-               "rel_logits": rel_logits[0], "logits": logits[0], "v_obj": v_obj,
-               "boxes": boxes_b, "n_boxes": N}
-        if field_out is not None:
-            out["cand_idx"] = cand[0]
-            out["field_cos"] = cos_m[0]
-            out["field"] = {
-                k: (v[0] if torch.is_tensor(v) and v.dim() > 0 and v.shape[0] == 1 else v)
-                for k, v in field_out.items()
-            }
-            diag = {"delta_norm": delta.detach().norm(dim=-1).mean()}
+            out["logits"] = logits.scatter(-1, cand, logit_m.to(logits.dtype))
+            out["cand_idx"] = cand
+            out["field_cos"] = cos_m
+            out["field"] = field_out
+            diag = {"delta_norm": delta.detach().norm(dim=-1).flatten(1).mean(-1)}
             gamma = getattr(self.field_read, "gamma", None)
             if gamma is not None:
-                diag["gamma_l1"] = gamma.detach().abs().sum()
-            if "w_bg" in out["field"]:
-                diag["w_bg_mean"] = out["field"]["w_bg"].mean()
+                diag["gamma_l1"] = gamma.detach().abs().sum().expand(B)
+            if "w_bg" in field_out:
+                diag["w_bg_mean"] = field_out["w_bg"].detach().mean(dim=(1, 2))
             out["field_diag"] = diag
-        if not training:
+        return out
+
+    def _compute(self, base: torch.Tensor, boxes_b: torch.Tensor,
+                 gt_list: Optional[List[List[Tuple[int, int, int]]]] = None,
+                 eval_budget: Optional[int] = None,
+                 box_cls: Optional[torch.Tensor] = None,
+                 field_ablate: Optional[str] = None):
+        """Single-image view over :meth:`_forward_pairs` (+ losses when training).
+
+        boxes_b [1, N, 4] normalised cxcywh; gt_list per-image triples.
+        Returns dict with indices, logits, and (train) the seven loss terms.
+        """
+        o = self._forward_pairs(base, boxes_b, None, gt_list, eval_budget, field_ablate)
+        B = o["sub_idx"].shape[0]
+        out = {"sub_idx": o["sub_idx"][0], "obj_idx": o["obj_idx"][0],
+               "valid_mask": o["valid_mask"][0], "rel_logits": o["rel_logits"][0],
+               "logits": o["logits"][0], "v_obj": o["v_obj"], "boxes": boxes_b,
+               "n_boxes": o["n_boxes"], "geo_scores": o["geo_scores"],
+               "zs": o["zs"], "zo": o["zo"]}
+        if "field" in o:
+            out["cand_idx"] = o["cand_idx"][0]
+            out["field_cos"] = o["field_cos"][0]
+            out["field"] = {
+                k: (v[0] if torch.is_tensor(v) and v.dim() > 0 and v.shape[0] == B else v)
+                for k, v in o["field"].items()
+            }
+            out["field_diag"] = {
+                k: (v[0] if torch.is_tensor(v) and v.dim() > 0 and v.shape[0] == B else v)
+                for k, v in o["field_diag"].items()
+            }
+        if gt_list is None:
             return out
-        out.update(self._losses(out, gt_list, q, q_spa, geo19, is_gt, labels, force,
-                                sub_idx, obj_idx, valid_mask, v_obj, boxes_b, N, box_cls))
+        out.update(self._losses(out, gt_list, o["q"], o["q_spa"], o["geo19"],
+                                o["is_gt"], o["labels"], o["force"],
+                                o["sub_idx"], o["obj_idx"], o["valid_mask"],
+                                o["v_obj"], boxes_b, o["n_boxes"], box_cls,
+                                box_counts=o["box_counts"]))
         return out
 
     # ------------------------------------------------------------- losses
 
     def _losses(self, out, gt_list, q, q_spa, geo19, is_gt, labels, force,
-                sub_idx, obj_idx, valid_mask, v_obj, boxes_b, N, box_cls=None):
+                sub_idx, obj_idx, valid_mask, v_obj, boxes_b, N, box_cls=None,
+                box_counts=None):
         """Seven RA loss terms for one image (sum form; trainer averages per set)."""
         from .ra.ontology import build_ontology  # noqa: F401  (tables already on self.onto)
         device = q.device
+        n_b = int(box_counts[0]) if box_counts is not None else N
         if self.onto is not None:
             for kt, tt in self.onto.items():
                 self.onto[kt] = tt.to(device)
@@ -487,64 +521,62 @@ class YOLOVORelate(nn.Module):
         V = self.vocab_head.W.shape[0]
         zeros = q.new_zeros
 
-        # gt hot per slot [K, V]
+        # gt hot per slot [K, V]（向量化 scatter；K 最多 128，逐槽 Python 循环是热点）
         K = sub_idx.shape[1]
         gt_hot = torch.zeros(K, V, dtype=torch.bool, device=device)
-        for k in range(K):
-            if valid_mask[0, k]:
-                lab = labels[0, sub_idx[0, k] * N + obj_idx[0, k]]
-                if lab >= 0:
-                    gt_hot[k, lab] = True
+        ks = valid_mask[0].nonzero(as_tuple=True)[0]
+        if ks.numel():
+            labs = labels[0, sub_idx[0, ks] * N + obj_idx[0, ks]]
+            ok = labs >= 0
+            gt_hot[ks[ok], labs[ok]] = True
         has_gt = gt_hot.any(-1) & valid_mask[0]
         hot = gt_hot[has_gt].float()
 
         terms = {}
 
+        # 全词表 cosine 直接由 out["logits"] 还原：dual-score 就是 cos*scale+bias，
+        # 已含 field 候选列的 scatter。原实现每图重算 [K,512]@[512,V] 两遍（forward 2 次 + backward 4 次），
+        # 单项 4.9 ms/图，是 _losses 里最大开销。affine 取 detach：NCE 作用在 raw cos 上，
+        # 本就不该回传到 logit_scale/bias（RA 规则）。
+        scale = self.vocab_head.logit_scale.exp().clamp(max=100.0).detach()
+        cos_all = (out["logits"] - self.vocab_head.logit_bias.detach()) / scale
+
         # 1. InfoNCE (batch-local: within-image columns; hard negatives by neg_lw)
         if has_gt.any():
-            qg = q[0][has_gt]
-            qsg = q_spa[0][has_gt]
-            alpha = self.vocab_head.alpha
-            cos_sem = F.normalize(qg, dim=-1) @ self.vocab_head.W.T
-            cos_spa = F.normalize(qsg, dim=-1) @ self.vocab_head.W.T
-            a = alpha.unsqueeze(0)
-            cos = (1.0 - a) * cos_sem + a * cos_spa
-            # The field only re-scores the selected candidate columns; the NCE
-            # denominator still runs over the full vocabulary (MD §2.6).
-            if out.get("cand_idx") is not None and out.get("field_cos") is not None:
-                cos = cos.scatter(1, out["cand_idx"][has_gt],
-                                  out["field_cos"][has_gt].to(cos.dtype))
+            cos = cos_all[has_gt]
             logits_n = cos / 0.07
             neg_lw = self.onto["neg_lw"] if self.onto else torch.ones(V, V, device=device)
             pos_mask = self.onto["pos_mask"] if self.onto else torch.eye(V, dtype=torch.bool, device=device)
             inv_mask = self.onto["inverse_mask"] if self.onto else torch.zeros(V, V, dtype=torch.bool, device=device)
             hot_b = hot.bool()
-            pos_any = (hot_b.float() @ pos_mask.float()) > 0
-            inv_any = (hot_b.float() @ inv_mask.float()) > 0
-            lw = (hot @ neg_lw).masked_fill(pos_any | inv_any, 0.0)
-            den = torch.logsumexp(logits_n + lw, dim=-1)
             a_idx, g_idx = hot_b.nonzero(as_tuple=True)
+            # 稀疏行 gather 代替 hot @ [V,V]：10k 谓词时后者每图要读 430MB 权重表。
+            pos_any = torch.zeros_like(hot)
+            pos_any.index_add_(0, a_idx, pos_mask[g_idx].to(hot.dtype))
+            inv_any = torch.zeros_like(hot)
+            inv_any.index_add_(0, a_idx, inv_mask[g_idx].to(hot.dtype))
+            lw = torch.zeros_like(hot)
+            lw.index_add_(0, a_idx, neg_lw[g_idx])
+            lw = lw.masked_fill((pos_any > 0) | (inv_any > 0), 0.0)
+            den = torch.logsumexp(logits_n + lw, dim=-1)
             per = den[a_idx] - logits_n[a_idx, g_idx]
             terms["nce"] = per.mean()
 
             # 2. swap hinge (RA losses.swap_direction_hinge; sym exempt)
             sym = self.onto["sym"] if self.onto else torch.zeros(V, dtype=torch.bool, device=device)
-            W = self.vocab_head.W
-            cos_q = (1.0 - alpha) * (F.normalize(q[0], dim=-1) @ W.T) + alpha * (F.normalize(q_spa[0], dim=-1) @ W.T)
+            cos_q = cos_all
             terms_swap = []
-            pair_set = {}
-            for k in range(K):
-                if valid_mask[0, k]:
-                    pair_set[(int(sub_idx[0, k]), int(obj_idx[0, k]))] = k
+            gt_sym = {(int(x), int(y), int(z)) for (x, y, z) in gt_list[0]}
+            sv, ov, vm = sub_idx[0], obj_idx[0], valid_mask[0]
             for (s, o, p) in gt_list[0]:
-                if sym[p]:
+                if sym[p] or (o, s, p) in gt_sym:
                     continue
-                if (o, s, p) in {(x, y, z) for (x, y, z) in gt_list[0]}:
+                kf_m = vm & (sv == s) & (ov == o)
+                kb_m = vm & (sv == o) & (ov == s)
+                if not (bool(kf_m.any()) and bool(kb_m.any())):
                     continue
-                kf = pair_set.get((s, o))
-                kb = pair_set.get((o, s))
-                if kf is None or kb is None:
-                    continue
+                kf = int(kf_m.nonzero(as_tuple=True)[0][0])
+                kb = int(kb_m.nonzero(as_tuple=True)[0][0])
                 terms_swap.append(F.relu(0.05 + cos_q[kb, p] - cos_q[kf, p]))
             terms["swap"] = torch.stack(terms_swap).mean() if terms_swap else q.new_zeros(())
 
@@ -564,9 +596,9 @@ class YOLOVORelate(nn.Module):
         # RA _object_text_loss: 双投影(sub/obj_text_proj)各 CE 取均值，且除以
         # infonce_temp=0.07（裸余弦进 CE 梯度过弱）。
         if self.W_obj.numel() and box_cls is not None and len(box_cls):
-            n_al = min(v_obj.shape[1], len(box_cls))
-            assert n_al == len(box_cls), (
-                f"obj loss alignment: v_obj rows ({v_obj.shape[1]}) != box_cls ({len(box_cls)})")
+            n_al = len(box_cls)
+            assert n_al == n_b, (
+                f"obj loss alignment: box_cls ({n_al}) != valid boxes ({n_b})")
             feats_al = v_obj[0][:n_al]
             labels_al = box_cls[:n_al].to(device).long()
             obj_loss = q.new_zeros(())
@@ -592,22 +624,26 @@ class YOLOVORelate(nn.Module):
         else:
             terms["bg"] = q.new_zeros(())
 
-        # 6/7. geo + rel(focal) from the sampler stage — recomputed here on the
-        # full pair grid (RA computes them inside the sampler; kept separate for
-        # interface parity with our trainer's accumulate)
-        geo_feats = RelGeomEncoder.features(
-            boxes_b.unsqueeze(2).expand(-1, N, N, 4),
-            boxes_b.unsqueeze(1).expand(-1, N, N, 4)).reshape(-1, NUM_GEO)
-        geo_scores = self.sampler.geo_scorer(geo_feats).squeeze(-1)
-        pair_valid = geo_scores.new_ones(geo_scores.shape, dtype=torch.bool)
+        # 6/7. geo + rel(focal) from the sampler stage. 几何特征与 f_sub/f_obj
+        # 由 _forward_pairs 整批算好后经 out 传入（原实现每图重算一遍 N×N）。
+        gs = out.get("geo_scores")
+        if gs is None:
+            b = boxes_b.shape[0]
+            gs = self.sampler.geo_scorer(RelGeomEncoder.features(
+                boxes_b.unsqueeze(2).expand(b, N, N, 4),
+                boxes_b.unsqueeze(1).expand(b, N, N, 4)).reshape(b, N * N, NUM_GEO)).squeeze(-1)
+        geo_scores = gs[0]
         ar = torch.arange(N, device=device)
-        not_self = (ar.unsqueeze(0) != ar.unsqueeze(1)).reshape(-1)
-        pair_valid = not_self
+        valid_box = ar < n_b
+        pair_valid = ((valid_box.unsqueeze(0) & valid_box.unsqueeze(1))
+                      & (ar.unsqueeze(0) != ar.unsqueeze(1))).reshape(-1)
         n_valid = pair_valid.float().sum().clamp(min=1.0)
         geo_bce = F.binary_cross_entropy_with_logits(geo_scores, is_gt[0].float(), reduction="none")
         terms["geo"] = (geo_bce * pair_valid.float()).sum() / n_valid
 
-        zs, zo = self.sampler.f_sub(v_obj), self.sampler.f_obj(v_obj)
+        zs, zo = out.get("zs"), out.get("zo")
+        if zs is None:
+            zs, zo = self.sampler.f_sub(v_obj), self.sampler.f_obj(v_obj)
         z_s = zs[0][out["sub_idx"]]
         z_o = zo[0][out["obj_idx"]]
         rel_scores1 = (z_s * z_o).sum(-1) / (self.sampler.rel_dim ** 0.5)
@@ -628,15 +664,15 @@ class YOLOVORelate(nn.Module):
     def _select_candidates(self, logits: torch.Tensor, gtp: Optional[torch.Tensor],
                            valid: torch.Tensor, m: int, training: bool) -> torch.Tensor:
         """Top-M predicate columns per pair; GT column forced in during training."""
-        K, V = logits.shape[1], logits.shape[2]
-        scores = logits[0].clone()
+        B, K, V = logits.shape
+        scores = logits.clone()
         if training and gtp is not None:
-            for k in range(K):
-                p = int(gtp[k]) if int(gtp[k]) >= 0 else -1
-                if p >= 0:
-                    scores[k, p] = float("inf")
-        scores[~valid] = float("-inf")
-        return scores.topk(min(m, V), dim=-1).indices.unsqueeze(0)
+            ok = (gtp >= 0).unsqueeze(-1)
+            idx = gtp.clamp(min=0).unsqueeze(-1)
+            forced = scores.scatter(2, idx, torch.full_like(idx, float("inf"), dtype=scores.dtype))
+            scores = torch.where(ok, forced, scores)
+        scores = scores.masked_fill(~valid.unsqueeze(-1), float("-inf"))
+        return scores.topk(min(m, V), dim=-1).indices
 
     # ------------------------------------------------------------ compat
 

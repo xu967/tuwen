@@ -1,8 +1,8 @@
 # GLP V1/V2 实现与训练（RA-4M）
 
 - 时间：2026-11-01
-- 范围：`ultralytics/models/yolovo/relate/`、`tests/test_glp_field.py`、`train.py`、`RA-4M/glp/`
-- 结论：部分完成（代码+单测完成；RA-4M smoke 训练完成，指标未达可用水平，5 epoch 对照结果见 `GLP_RESULTS.md`）
+- 范围：`ultralytics/models/yolovo/relate/`、`tests/test_glp_field.py`、`train.py`、`RA-4M/`
+- 结论：进行中（V1/V2 已按全量 RA-4M + 100 epoch 启动；单测 24/24 通过）
 
 ## 做了什么
 
@@ -82,3 +82,321 @@
 - 完整 41 图 SGCls 未跑完；5 图结果只验证接口，不能当统计结论。
 - 当前 RA-4M 关系是 RelGen 几何生成（4 谓词），不是 RA-4M 真实 `rel_annotations`；结论不能外推到开放谓词。
 - `ultralytics` 代码来自回收站，与当前根脚本版本需持续核对；`DATASET_CACHE_VERSION` 别名是兼容补丁。
+
+## 更新 2026-11-01 全量 RA-4M + 100 epoch
+
+### 做了什么
+
+- **个人 skill**：新增硬规则「禁止多 seed」——所有实验固定 `seed=0`，不跑 seed sweep、
+  不用多 seed 均值±方差。
+- **关系头性能改造**（`relate/head.py`、`relate/trainer.py`）：
+  - 新增 `_forward_pairs()`：整批一次前向，图像按最大框数右填充 `boxes[Nmax]`，
+    用 `box_counts` 标记有效前缀；`_compute()` 保留为单图视图（eval 路径不变）。
+  - `_Sampler` 已支持 `box_counts`（原本就有，只是没有传）。
+  - `_select_candidates` 改为整批 `[B,K,V]`。
+  - 训练器 `_compute_loss`：先整批前向，再逐图算七项损失；不再逐图调用 `_compute`。
+  - `_losses` 热点向量化：`gt_hot` 用 scatter；swap 用 `sv/ov` 掩码查找；
+    NCE 的 `hot @ [V,V]` 换成稀疏行 `index_add_`（10k 谓词时每图少读 430MB）。
+- **全量数据接入**：
+  - COCO → YOLO 框 + `R sub obj rel_id` 行，写入 `RA-4M/labels/{train,val}`。
+  - 统计：train 472,344 图 / 2,668,852 框 / 4,282,531 关系；val 24,964 图 /
+    140,912 框 / 226,203 关系；skipped_rels=0，missing_images=0。
+  - 谓词 10,370（`rel_categories` 全量）、类别 497（`categories` 全量）。
+  - `RA-4M/data_full.yaml`（train/val 全量）；`data_full_monitor.yaml`
+    （train 全量 + val 取 1,024 张固定子集，用于逐 epoch 监控）；`data_full_smoke.yaml`（64 图）。
+- **`W_obj` 支持 data yaml 覆盖**（`wiring.py` / `namespace.py`）：`resolve_objnames()`
+  把 data yaml 的 `names` 传给 `attach_relate_layer`，解决一级模型 20/80 类与 RA-4M 497 类不一致。
+- **文本编码分批**（`encode_predicate_bank`）：10,370×3 模板分 512 一批，避免 OOM。
+- **单测**：新增 `test_batched_forward_matches_per_image_losses`（填充批前向 vs 单图损失，
+  误差 <1e-4），共 24/24 通过。
+
+### 实测速度
+
+| 场景 | 结果 |
+| --- | --- |
+| 600 图（V=4）改造前 | 96.3 s/epoch，2.36 s/it |
+| 600 图（V=4）改造后 | 38.8 s/epoch |
+| 2,048 图全量口径（V=10,370） | 112.6 s/epoch（含 64 图 val），约 0.56 s/it / 35 ms 每图 |
+| 推算全量 | 约 4.6 h/epoch；100 epoch 约 19 天/变体（加监控 val 约 20 天）|
+
+### 启动
+
+- 顺序后台任务：`glp_full_v1_e100` → `glp_full_v2_e100`，均 `batch=16, workers=8,
+  imgsz=640, lr0=1e-3, seed=0, amp=true`。
+- 日志：`logs/full_v1.log`、`logs/full_v2.log`、`logs/full_runs.log`。
+- 首次启动要扫描 472k 标签建 `labels.relate.cache`（约 30 分钟，只发生一次）。
+
+### 没做什么
+
+- 没有跑完任何全量 epoch（刚启动），没有全量结果。
+- 没有做最终全量 val（24,964 图）；训练期 val 用 1,024 图子集，避免每 epoch 2 小时验证。
+- 没有多 seed（按用户新规则，固定 seed=0）。
+- 没有改训练超参（batch/workers/imgsz/lr0/AMP 均沿用上一轮）。
+- 没有提交/推送 Git（等用户确认）。
+- 没有给 `build_ontology` 的 `inverse_mask` 补 device 推断（当前流程在 CPU 上 attach，
+  不受影响；模型已在 GPU 上再 attach 会报 device mismatch）。
+
+### 待确认
+
+- 全量 100 轮约 20 天/变体、共约 40 天，是否接受这个时长。
+- 训练期 val 用 1,024 图子集、最终再跑全量 24,964 图验证，是否接受这个口径。
+
+## 更新 2026-11-01 训练进度条不显示
+
+### 根因
+
+- Jupyter/网页终端把 pty 尺寸报成 `0x0`；tqdm 的 `_screen_shape` 得到 `(0,0)`，
+  `nrows = -1`，`display()` 里 `pos >= nrows - 1` 直接 `return False`，
+  所以**每次刷新都被静默丢弃**，整条进度条完全不渲染。
+- 用真 pty 复现：`tqdm(total=3)` 的 `nrows=-1`、`display()` 返回 False；
+  `ioctl(TIOCSWINSZ, 40x120)` 后 `nrows=39`、进度条正常。
+- 与训练代码无关：`TQDM` 的 `disable` 一直是 False，`VERBOSE=True`。
+
+### 修复
+
+- `train.py` 顶部新增 `_ensure_tty_size()`：检测到 stdout/stderr 的终端尺寸 `<2` 时，
+  用 `fcntl.ioctl(TIOCSWINSZ)` 设成 40 行 × 120 列，并补 `COLUMNS/LINES` 环境变量。
+- 终端尺寸正常时什么都不做；非 TTY（重定向到日志）不受影响。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 真 pty 下原始 tqdm | `nrows=-1`，无输出 |
+| 真 pty 下 `_ensure_tty_size()` + tqdm | 尺寸 120x40，进度条正常渲染 |
+| 非 TTY 管道 | 仍输出 `\r` 分隔的条形（日志照常） |
+
+### 没做什么
+
+- 没有改 ultralytics 的全局 `TQDM` 类（避免影响验证/预测等其他入口）。
+- 日志重定向到文件时，进度条仍是 `\r` 覆盖式，`tail -f` 看不到动态刷新；
+  要看刷新用 `tail -f logs/xxx.log | tr '\r' '\n'`。
+
+## 更新 2026-11-01 改用官方 proxy50k 子集
+
+### 决定
+
+- 全量 472k × 100 epoch 约 20 天/变体、两版约 40 天；用户拍板先用官方 development proxy。
+
+### 做了什么
+
+- 数据：读 `RA-4M/packs/megasg_proxy50k/train/file_names.json`，在
+  `RA-4M/proxy50k/{images,labels}` 建 50,000 对软链（不复制大文件）。
+  - 50,000 图 / 276,790 框 / 495,470 关系（9.91 关系/图，全量 9.07）。
+- 配置：`RA-4M/data_proxy50k.yaml`
+  - `train: proxy50k/images`，`val: full_monitor/images`（1,024 图）
+  - 词表保持 497 类 / 10,370 谓词，checkpoint 与全量配置兼容
+- `train.py` 默认改为 `data_proxy50k.yaml`，默认 run 名
+  `glp_proxy50k_v1_e100` / `glp_proxy50k_v2_e100`。
+- 全量配置保留：`data_full.yaml`（全量 val）、`data_full_monitor.yaml`；
+  需要全量训练时用 `YOLOVO_RELATE_DATA=RA-4M/data_full_monitor.yaml python train.py` 覆盖。
+
+### 验证
+
+- `YOLOVO_EPOCHS=1 YOLOVO_NAME=tmp_proxy50k_e1 python train.py` 正在跑，
+  用来确认真实 epoch 时间和全链路（启动、扫描 50k 标签、训练、监控 val）。
+
+### 没做什么
+
+- 没有重采样/分层：proxy50k 是官方给定的随机子集，不做二次挑选。
+- 没有为子集裁剪谓词词表（保持 10,370，和全量口径一致）。
+
+### 实测（proxy50k）
+
+- 1 epoch 验证跑到 366/3125 iter：`1.22 it/s`（0.82 s/it），对应 **约 43 分钟/epoch**；
+  加 1,024 图监控 val（约 10 分钟）≈ **53 分钟/epoch**，100 轮约 **3.7 天/变体**，
+  V1+V2 约 **7.5 天**（比预估的 2.7 天慢，原因是 proxy 的关系/图更多、GPU 与另一进程共享）。
+- proxy50k 的 `labels.relate.cache` 已生成（36.8 MB），用户正式跑时无需再等 7 分钟扫描。
+- 50,000 张里有 **1 张 0 字节坏图**（`objects365_v2_01228848.jpg`，源数据就是空文件），
+  扫描时自动跳过，不影响训练。
+
+## 更新 2026-11-01 训练速度审核（只测不改）
+
+### 测量方法
+
+临时脚本放 `/tmp` 并已删除：dataloader 单独计时、整步 CUDA event 分段、
+`torch.profiler`（CPU+CUDA kernel）、逐项拆 `_losses`、A/B 对比。
+GPU 与用户自己的训练进程共享，绝对值偏高，比例可信。
+
+### 结论
+
+| 环节 | 实测 |
+| --- | --- |
+| dataloader（8 workers） | 59 ms/batch，270 img/s → **不是瓶颈** |
+| 骨干前向（冻结，AMP） | ~80 ms/step |
+| 关系头前向 `_forward_pairs` | ~176 ms/step（单个最大 kernel：`grid_sampler_2d_backward` 68 ms） |
+| 逐图 `_losses` × 16 | 350–430 ms/step；A/B 跳过它：1100 → 380 ms/step（**~50%**） |
+| 逐图指标 / field_diag 同步 | ~200 ms/step；A/B 去掉：1.20–1.26× |
+| 反向 + 优化器 | ~380 ms/step |
+| GPU 利用率 | 31–41%（CPU/launch 受限，不是 GPU 打满） |
+
+原因（按影响排序）：
+
+1. `_compute_loss` 逐图调 16 次 `_losses`：每次独立跑 `[K,512]@[512,V=10370]`
+   的 NCE/swap 余弦、`[K,V]` sigmoid、`topk(10370)`、对象对齐 CE → 小 GEMM + 反向，launch 开销和低占用叠加。
+2. 逐图 GPU→CPU 同步：`int(counts[i])`、`float(v[i])`（field_diag）、
+   `FieldMetricAccumulator.update` 的 `.tolist()/.argmax/.cpu()`，一步约 130 次强制同步。
+3. 槽位浪费：sampler 的 `K2` 固定 `final_budget=128`，但每图有效对只有
+   `min(128, n(n-1))`——proxy50k 平均 29.6、中位 12，**槽位利用率 ~23%**。
+   后续 transformer / deformable / field(4 候选×32 核×5 点 grid_sample) /
+   `[K,V]` 打分全按 128 算，这是 `grid_sampler` 反向 68 ms 的主因。
+4. `_losses` 每图重算一遍 N×N 几何特征 + `geo_scorer` + `f_sub/f_obj`，
+   `_Sampler` 在整批前向里刚算过。
+5. swap 为了几个 GT 对的 cos 先算了两遍 `[K=128,V]` 全词表余弦（4.9 ms/图，`_losses` 内最大单项）。
+
+### 顺手发现的一个正确性问题（非速度）
+
+`YOLOVOTrainer.preprocess_batch` 会把 `batch["cls"]` 重映射为 batch 内采样文本的局部 id
+（`remap_cls`），而 `_losses` 的对象对齐损失用这个 id 索引 `W_obj`（RA-4M 全局类名，
+497 行）——索引错位，obj 损失（λ=0.1）在学错的目标。
+
+### 没做什么
+
+- 没有改任何训练/模型代码，没有动超参，没有重跑实验。
+- 没有测 solo（独占 GPU）下的绝对耗时；用户进程全程在跑。
+- 没有实现上面任何一条优化。
+
+## 更新 2026-11-01 训练加速（已改代码）+ batch 32
+
+### 做了什么
+
+1. `relate/head.py::_losses`：全词表 cosine 不再每图重算。
+   NCE 与 swap 改为从 `out["logits"]` 反算 `cos = (logit - bias) / scale`
+   （dual-score 本来就是 `cos*scale + bias`，已含 field 候选列的 scatter）；
+   `logit_scale/logit_bias` 取 `detach()`，保证 NCE 不把梯度回传到仿射参数。
+   删掉原来每图的两次 `[K,512]@[512,V]`（4.9 ms/图，`_losses` 内最大单项）。
+2. `relate/head.py::_forward_pairs`：整批算一次 N×N 几何打分与 `f_sub/f_obj`，
+   通过 `out["geo_scores"] / out["zs"] / out["zo"]` 传给逐图 `_losses`
+   （原来每图重算一遍，`_losses` 缺这些键时仍回退到重算，接口不变）。
+   `_compute` 同步透传。
+3. `relate/trainer.py::_compute_loss`：`counts.tolist()` 一次代替逐图 `int(counts[i])`；
+   `field_diag` 用张量累加、末尾一次取值；`n_pred_pairs` 末尾一次 stack 统计。
+4. `relate/field_metrics.py`：`FieldMetricAccumulator` 全程张量累计，`compute()`
+   才取值；新增 `slot_labels` 入参（trainer 直接给每槽位 GT 谓词），免掉逐图
+   `.tolist()`；`_macro_f1` 从「按类循环 10,370 次 + 每次同步」改为 `bincount` 向量化。
+5. `train.py`：关系训练 `batch=16 → 32`（`nbs=64`，内部 accumulate=2，
+   等效优化器步长仍是 64 图）。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `tests/test_glp_field.py` | 24/24 通过（含 batched vs 单图损失 <1e-4） |
+| 新旧 cosine 等价性 | 最大绝对差 6.3e-5（fp16 matmul 舍入级） |
+| 单步（含前向+反向+优化器）batch 16 | 1100 → **535 ms** |
+| 单步 batch 32 | 1027 ms（31.2 img/s，峰值显存 9.1 G） |
+| 真实 trainer：2,048 图 1 epoch | **74 s**（1.08 s/it，28 img/s）+ 64 图 val 11 s |
+| 1 epoch 冒烟（`data_full_smoke.yaml`） | 通过；loss/FieldMetrics/保存/val 全链路正常 |
+
+按实测推算 proxy50k 50,000 图：约 **30 min/epoch**（原来实测 43 min），
+100 轮约 2.1 天/变体（原 3.7 天）。
+
+### 没做什么
+
+- 没做「七项损失整批向量化」和「按框数分桶的 batch sampler」——那是下一档 2-3×，
+  改动大，先不动。
+- 没修 `batch["cls"]` 被 `remap_cls` 重映射导致 `W_obj` 索引错位的问题（正确性问题，
+  改它会改变 obj 损失的目标，等用户决定）。
+- 没跑多 seed、没调其他超参；没有重训已有 run。
+
+## 更新 2026-11-01 打开图像 RAM 缓存（用户要求）+ batch 可降级
+
+### 做了什么
+
+- `train.py`：`cache=True`（`YOLOVO_CACHE=0` 可关）；`batch` 改为
+  `YOLOVO_BATCH` 环境变量可覆盖（默认 32）。
+- 原因：用户扩容内存后要求开启。实测数据等待本来只占 1.6%（29 ms/batch，
+  workers=16 时 0.5%），开缓存后这部分归零，但**不是**主要瓶颈。
+
+### 实测
+
+| 项 | 结果 |
+| --- | --- |
+| 缓存容量（proxy50k 10% 抽样外推） | 50,000 图 ≈ **41 GiB**（不是 91 GiB：该 fork 的 `load_image` 先把图拉伸成 640×640 再缓存，每图 ~0.88 MB） |
+| 首轮装载时间 | ~2 分钟（56 线程 ThreadPool） |
+| 端到端（batch 16 + cache，1 epoch 冒烟） | 通过 |
+| batch 32 + cache | **CUDA OOM**：卡上另有别人的 11.6 GiB 进程，21.49 GiB 卡放不下我们的 10–11 GiB |
+
+### 没做什么
+
+- 没有为 cache 改 collate/augment；缓存数组只读，worker 通过 fork COW 共享，不会翻倍。
+- 没有把 val 的缓存单独关掉（1,024 图约 1.2 GiB，可忽略）。
+
+### 风险
+
+- batch 32 峰值显存 10–11 GiB；和别人的大进程同卡会 OOM，用 `YOLOVO_BATCH=16` 降级
+  （峰值约 5 GiB）。
+
+## 更新 2026-11-01 指标链路审核 + 验证表头修正
+
+### `train.py` 里 `data="/root/datasets/M3FD_split/data.yaml"` 是什么
+
+- 它在 `else:` 分支里，即 `YOLOVO_RELATE_DATA` 为空时才走——那是**仓库原有的一级
+  YOLOVO 多模态检测训练入口**（M3FD 数据集），不是关系训练配置。git 里 `e47cbd8`
+  已存在，我们没有改过。
+- 该路径在本机不存在（`/root/datasets` 整个目录都没有），所以 `YOLOVO_RELATE_DATA= python train.py`
+  会直接 FileNotFoundError。默认路径（`data_proxy50k.yaml`）不受影响。
+
+### 评价指标链路（逐段核对）
+
+| 环节 | 用的是关系指标？ |
+| --- | --- |
+| best.pt 选择 / 早停 fitness | **是**：`val.py::get_stats` 写 `d["fitness"]=F1@50`，`engine/trainer.py:814` pop 出来 |
+| results.csv 列 | **是**：R@20/50/100、mR@50/100、F1@50、pair_existence_AP、predicate_acc、DetPairRecall、PairRecall、GT_MRR |
+| 每轮日志 | **是**：`[RelateVal] ...` 一行 |
+| 验证进度条表头 | **原来不是**：继承 DetectionValidator 的 “Box(P R mAP50 mAP50-95)”，这些列关系验证从不填充 → 已改 |
+| results.png（训练结束自动画图） | **不是**：`plot_results` 仍按 `metrics/mAP50-95(B)` 等列名找列，找不到就 warning + 按默认下标乱画 |
+
+### 做了什么
+
+- `relate/val.py`：新增 `RelateMetricsMixin.get_desc()`，进度条表头改为
+  `RelationVal (R@K / mR@K / F1@50 / ExAP)`，不再显示从不计算的 Box 列。
+
+### 没做什么
+
+- 没改 `results.png` 的列映射（改的是 `utils/plotting.py` 的公共代码，影响其他任务）；
+  训练结束那张图仍是无意义的，看 `results.csv` 即可。
+- 没动 `train.py` 的 else 分支（仓库原有代码），要不要删等用户定。
+
+## 更新 2026-11-01 关系链路审计（ponytail-audit）+ cache 默认关闭
+
+### 做了什么
+
+- 审计 `ultralytics/models/yolovo/relate/` 全链路：`head.py` / `field.py` / `dataset.py` / `gen.py` /
+  `trainer.py` / `wiring.py` / `namespace.py` / `val.py` / `predict.py` / `field_metrics.py`。
+- 实测验证了两件事：
+  - 验证集的 GT 框与预测框**同处 letterbox 画布坐标系**（`ds[0]` 的 `bboxes` 已被变换：
+    `0.117676→0.13588`，`ratio_pad=((0.6253,0.625),(16,21))`）——验证链路坐标系是对的。
+  - 单测 24/24 通过（`tests/test_glp_field.py`，无 pytest，用脚本逐函数调用）。
+- `train.py`：`cache` 默认 `1` → `0`。原因：`cache=True` 会把 5 万张图解码后常驻内存，
+  实测到 38.7 GB 时进程被内核 SIGKILL（容器 cgroup `memory.max` = 58 GiB，读图产生的
+  page cache 也计入该上限）。数据加载本来有 9× 余量（270 vs 30 img/s），缓存无收益。
+
+### 没做什么
+
+- 审计发现的问题**一个都没有代码改动**（除上面 cache 默认值），等确认后再逐条修。
+- 没有改 `results.png` 的列映射、没有删 `train.py` 的 `else:` 分支。
+
+### 审计发现（按严重度）
+
+| # | 位置 | 问题 |
+| --- | --- | --- |
+| 1 | `trainer.py:247` + `head.py:598-609` | `batch["cls"]` 已被 `YOLOVOTrainer.preprocess_batch` 重映射成**局部文本 id**（0..K-1，K≈80），却被用来索引 497 行的 `W_obj`（按全局类 id 排）。obj 损失（λ=0.1）在教错类别，梯度还经 `sub_text_proj/obj_text_proj` 污染主查询。 |
+| 2 | `predict.py:88` | `postprocess` 逐图循环里 `rel.score(boxes)` 没传 `img_idx`，默认 0。batch>1 时第 2 张及以后的图都用**第 1 张图**的特征打分。 |
+| 3 | `dataset.py:250` | 扫描期 `except Exception` 吞掉 `parse_relate_lines` 的 ValueError（越界框索引、非法谓词 id），只丢图不中止，与 docstring 承诺相反。 |
+| 4 | `dataset.py:78-82` | `parse_rnames` 忽略原始 id，排序后重新 `enumerate`。1-based 或非连续 `rnames` 会被静默重编号，谓词整体错位。 |
+| 5 | `dataset.py:324/337` | 缓存 hash 只含路径+字节数，`rnames` 变了仍命中旧 cache，关系 id 静默错位。 |
+| 6 | `dataset.py:459-467` | `jitter_boxes_xywhn` 的 `generator` 参数没被使用（`rand_like` 不接 generator）；w/h 放大后 `clamp(min=1-w/2)` 上下界倒置。 |
+| 7 | `dataset.py` + `collate` | `rswap` / `rel_weights` / `spatial_flags` 解析、缓存、collate 一路传递，但全仓无消费者（head/loss 从不读）。 |
+| 8 | `field.py` | `compose_fields` / `gate` / `FieldConfig.compose` 只有单测在用，训练/验证路径从不调用。 |
+| 9 | `head.py:32` | `field_grid` / `field_stats` 只 import 未使用。 |
+| 10 | `field.py:92-96` | `field_grid(field, k, m)` 实际索引是 `field["mu"][batch, pair]`，k/m 语义与文档相反（仅诊断用）。 |
+| 11 | `dataset.py:394-397` | `build_relate_dataset` 原样透传 `task` 给 segment/obb/pose 的 Format，关系标签没有 segments/keypoints，会被清空或重排，relations 索引随之失效。 |
+| 12 | `trainer.py:341` | 日志读 `_rel_log["n_swap_pairs"]`，但从未被写入，恒 0。 |
+| 13 | `val.py:307` | 归一化尺寸用 `rel.feat_strides[0]`，但 capture 存的是 `base_idx`（P4）特征。`trainOVrel.py` 接线 P3/P4/P5 时 ih=40×8=320（应为 640），框坐标整体放大 2 倍再打分 → 该入口的 R@K/F1 全部失真。本仓 `train.py` 只用 P4 不受影响。 |
+| 14 | `val.py:358` + `val.py:97-105` | 检测为空时 `pred_boxes = labels`（GT 框），early-return 拿 GT 框算 IoU → DetPairRecall 恒 1.0；该分支也不累加 `pair_recall_total`，零检测图被 PairRecall 剔除。 |
+| 15 | `val.py:349` vs `314` | `update_metrics` 硬编码 60，`postprocess` 用 `rel.max_objects`；两者不等时 `pred_rels` 的框索引与 `pred_boxes` 对不上。 |
+| 16 | `val.py:141-151` | `_match_triplets` 的返回值从未使用，R@K 又在循环里重写同一匹配；IoU 矩阵整块重算 3 次（111/145/162 行）。 |
+| 17 | `val.py:159-168` | `pair_existence_AP` 没有一对一匹配，同一 GT 的近重复框会产生多个正样本，AP 偏高。 |
+| 18 | `val.py:208-210` | `F1@50` 实为 `2·R@50·mR@50/(R@50+mR@50)`，两项都是召回，没有精度项。`fitness=F1@50` 的语义与名字不符（注释里已说明是"惩罚偏科"，但对外报告别写成 F1）。 |
+| 19 | `val.py:98/150/218` | 未召回 GT 的 rank 哨兵是 `topk+1=101`，GT_MRR 每条未命中贡献 0.0099 而非 0。 |

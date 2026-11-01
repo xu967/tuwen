@@ -213,8 +213,9 @@ def test_select_candidates_forces_gt():
 
     head = _Stub()
     logits = torch.randn(1, 3, 10)
-    gtp = torch.tensor([7, -1, 2])
-    cand = YOLOVORelate._select_candidates(head, logits, gtp, torch.ones(3, dtype=torch.bool),
+    gtp = torch.tensor([[7, -1, 2]])
+    cand = YOLOVORelate._select_candidates(head, logits, gtp,
+                                           torch.ones(1, 3, dtype=torch.bool),
                                            m=3, training=True)
     assert cand.shape == (1, 3, 3)
     assert 7 in cand[0, 0].tolist()
@@ -387,3 +388,39 @@ def test_score_candidates_matches_full():
     assert torch.allclose(cos, exp_cos, atol=1e-5)
     assert torch.allclose(logit, exp_cos * vh.logit_scale.exp() + vh.logit_bias,
                           atol=1e-5)
+
+
+def test_batched_forward_matches_per_image_losses():
+    """Padded whole-batch forward must give the same per-image losses."""
+    rel = _relate_head(FieldConfig(mode="glp", n_candidates=2, n_kernels=2))
+    rel.eval()  # 关掉 dropout，比较的是数值路径而不是随机 mask
+    torch.manual_seed(0)
+    base = torch.randn(2, 768, 4, 4)
+    boxes = torch.tensor([
+        [[0.3, 0.4, 0.2, 0.2], [0.6, 0.5, 0.3, 0.2], [0.5, 0.3, 0.1, 0.1]],
+        [[0.4, 0.4, 0.2, 0.2], [0.7, 0.6, 0.2, 0.2], [0.5, 0.5, 0.01, 0.01]],
+    ])
+    counts = torch.tensor([3, 2])
+    gt = [[(0, 1, 0), (1, 2, 1)], [(0, 1, 2)]]
+    cls = [torch.tensor([0, 1, 2]), torch.tensor([0, 1])]
+    o = rel._forward_pairs(base, boxes, counts, gt_list=gt)
+    assert o["sub_idx"].shape[0] == 2 and o["logits"].shape[0] == 2
+    for i in range(2):
+        out_i = {
+            "logits": o["logits"][i], "sub_idx": o["sub_idx"][i],
+            "obj_idx": o["obj_idx"][i], "valid_mask": o["valid_mask"][i],
+            "rel_logits": o["rel_logits"][i], "boxes": boxes[i:i + 1],
+            "cand_idx": o["cand_idx"][i], "field_cos": o["field_cos"][i],
+            "field": {k: v[i] for k, v in o["field"].items()},
+        }
+        batched = rel._losses(
+            out_i, [gt[i]], o["q"][i:i + 1], o["q_spa"][i:i + 1], o["geo19"][i:i + 1],
+            o["is_gt"][i:i + 1], o["labels"][i:i + 1], o["force"][i:i + 1],
+            o["sub_idx"][i:i + 1], o["obj_idx"][i:i + 1], o["valid_mask"][i:i + 1],
+            o["v_obj"][i:i + 1], boxes[i:i + 1], o["n_boxes"], cls[i],
+            box_counts=counts[i:i + 1])
+        n = int(counts[i])
+        single = rel._compute(base[i:i + 1], boxes[i:i + 1, :n],
+                              gt_list=[gt[i]], box_cls=cls[i])
+        for k in ("nce", "swap", "sigmoid", "obj", "bg", "geo", "rel"):
+            assert abs(float(batched[k]) - float(single[k])) < 1e-4, (i, k, batched[k], single[k])

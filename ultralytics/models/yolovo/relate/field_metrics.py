@@ -53,25 +53,25 @@ def field_mass_in_box(field: Dict[str, torch.Tensor], box: torch.Tensor) -> torc
     return (w * gaussian_box_mass(mu, sigma, box)).sum(-1)
 
 
-def _topk_correct(logits: torch.Tensor, labels: torch.Tensor, k: int) -> int:
+def _topk_correct(logits: torch.Tensor, labels: torch.Tensor, k: int) -> torch.Tensor:
+    """命中数（张量，调用方在 epoch 末才取值，避免逐图同步）。"""
     if labels.numel() == 0:
-        return 0
+        return torch.zeros((), dtype=torch.long, device=logits.device)
     top = logits.topk(min(k, logits.shape[-1]), dim=-1).indices
-    return int((top == labels.unsqueeze(-1)).any(-1).sum())
+    return (top == labels.unsqueeze(-1)).any(-1).sum()
 
 
 def _macro_f1(pred: torch.Tensor, labels: torch.Tensor, n_cls: int) -> float:
+    """bincount 版 macro-F1：原实现按类循环 10k 次、每次一次 GPU 同步，单轮要几十秒。"""
     if labels.numel() == 0:
         return 0.0
-    f1s = []
-    for c in range(n_cls):
-        tp = int(((pred == c) & (labels == c)).sum())
-        fp = int(((pred == c) & (labels != c)).sum())
-        fn = int(((pred != c) & (labels == c)).sum())
-        if tp + fp + fn == 0:
-            continue
-        f1s.append(2 * tp / max(2 * tp + fp + fn, 1))
-    return float(sum(f1s) / len(f1s)) if f1s else 0.0
+    tp = torch.bincount(labels[pred == labels], minlength=n_cls).float()
+    denom = torch.bincount(pred, minlength=n_cls).float() + \
+        torch.bincount(labels, minlength=n_cls).float()
+    keep = denom > 0
+    if not keep.any():
+        return 0.0
+    return float((2 * tp[keep] / denom[keep]).mean())
 
 
 def aurc(confidence: torch.Tensor, correct: torch.Tensor) -> float:
@@ -92,90 +92,86 @@ class FieldMetricAccumulator:
 
     def __init__(self, n_cls: int):
         self.n_cls = n_cls
-        self.top1 = self.top5 = self.n_pred = 0
-        self.fma: List[float] = []
-        self.wbg_gap: List[float] = []
+        self.n_pred = 0
+        # 累计量保持张量形态，只在 compute()（epoch 末）取一次值：
+        # 逐图 .item()/.tolist() 每个 batch 要掐断 16 次 GPU 流水。
+        self.top1 = self.top5 = self.tp = self.fp = self.fn = 0
+        self.fma: List[torch.Tensor] = []
+        self.wbg_gap: List[torch.Tensor] = []
         self.aurc_conf: List[torch.Tensor] = []
         self.aurc_ok: List[torch.Tensor] = []
-        self.tp = self.fp = self.fn = 0
         self._pred_all: List[torch.Tensor] = []
         self._lab_all: List[torch.Tensor] = []
 
     @torch.no_grad()
-    def update(self, out: Dict, gt_list: Sequence[Sequence[Tuple[int, int, int]]]):
-        gt = gt_list[0] if gt_list else []
-        pair_gt = {}
-        for (s, o, p) in gt:
-            pair_gt[(int(s), int(o))] = int(p)
-        if not pair_gt:
-            return
-        sub = out["sub_idx"].tolist()
-        obj = out["obj_idx"].tolist()
-        valid = out["valid_mask"].bool()
+    def update(self, out: Dict, gt_list: Sequence[Sequence[Tuple[int, int, int]]] = ()):
+        if not (gt_list and gt_list[0]):
+            return  # 与旧实现一致：本图没有 GT 关系时不计入
         logits = out["logits"].float()
-        labels = torch.full((logits.shape[0],), -1, dtype=torch.long, device=logits.device)
-        for k, (s, o) in enumerate(zip(sub, obj)):
-            if valid[k] and (s, o) in pair_gt:
-                labels[k] = pair_gt[(s, o)]
-
+        valid = out["valid_mask"].bool()
+        # slot_labels 由 trainer 直接给（本图每槽位的 GT 谓词）；缺省时回退到 gt 列表反查
+        labels = out.get("slot_labels")
+        if labels is None:
+            pair_gt = {(int(s), int(o)): int(p) for (s, o, p) in (gt_list[0] if gt_list else [])}
+            if not pair_gt:
+                return
+            labels = torch.full((logits.shape[0],), -1, dtype=torch.long, device=logits.device)
+            for k, (s, o) in enumerate(zip(out["sub_idx"].tolist(), out["obj_idx"].tolist())):
+                if valid[k] and (s, o) in pair_gt:
+                    labels[k] = pair_gt[(s, o)]
+        labels = torch.where(valid, labels.long(), torch.full_like(labels.long(), -1))
         has = labels >= 0
-        if has.any():
-            lg, lb = logits[has], labels[has]
-            self.n_pred += int(lb.numel())
-            self.top1 += _topk_correct(lg, lb, 1)
-            self.top5 += _topk_correct(lg, lb, 5)
-            pred = lg.argmax(-1)
-            self._pred_all.append(pred.cpu())
-            self._lab_all.append(lb.cpu())
 
-            # existence P/R/F1 over all valid pairs (threshold 0.5)
-            v = valid
-            exist = torch.sigmoid(out["rel_logits"].float()[v]) >= 0.5
-            pos = has[v]
-            self.tp += int((exist & pos).sum())
-            self.fp += int((exist & ~pos).sum())
-            self.fn += int((~exist & pos).sum())
+        lg, lb = logits[has], labels[has]
+        self.n_pred += int(lb.numel())
+        if lb.numel():
+            self.top1 = self.top1 + _topk_correct(lg, lb, 1)
+            self.top5 = self.top5 + _topk_correct(lg, lb, 5)
+            self._pred_all.append(lg.argmax(-1))
+            self._lab_all.append(lb)
 
-            if "field" in out and "cand_idx" in out:
-                field = out["field"]
-                cand = out["cand_idx"]                       # [K,M]
-                boxes = out["boxes"][0]
-                obj_idx = out["obj_idx"]
-                obj_box = boxes[obj_idx]                     # [K,4]
-                mass = field_mass_in_box(field, obj_box)     # [K,M]
-                gtm = cand[has] == lb.unsqueeze(-1)           # [n,M]
-                if gtm.any():
-                    mass_gt = mass[has][gtm]
-                    self.fma.extend((2 * mass_gt - 1).clamp(-1, 1).tolist())
-                if "w_bg" in field:
-                    wbg = field["w_bg"][has]                  # [n,M]
-                    pos = wbg[gtm]
-                    neg = wbg[~gtm]
-                    if pos.numel() and neg.numel():
-                        # positive = GT predicates carry less background mass
-                        self.wbg_gap.append(float(neg.mean() - pos.mean()))
-                    conf = 1.0 - wbg.max(-1).values
-                    ok = lg.argmax(-1) == lb
-                    self.aurc_conf.append(conf.cpu())
-                    self.aurc_ok.append(ok.cpu())
+        # existence P/R/F1 over all valid pairs (threshold 0.5)
+        exist = torch.sigmoid(out["rel_logits"].float()[valid]) >= 0.5
+        pos = has[valid]
+        self.tp = self.tp + (exist & pos).sum()
+        self.fp = self.fp + (exist & ~pos).sum()
+        self.fn = self.fn + (~exist & pos).sum()
+
+        if "field" in out and "cand_idx" in out and lb.numel():
+            field = out["field"]
+            cand = out["cand_idx"]                       # [K,M]
+            obj_box = out["boxes"][0][out["obj_idx"]]    # [K,4]
+            mass = field_mass_in_box(field, obj_box)     # [K,M]
+            gy = cand[has] == lb.unsqueeze(-1)           # [n,M]
+            self.fma.append(((2 * mass[has] - 1).clamp(-1, 1))[gy])
+            if "w_bg" in field:
+                wbg = field["w_bg"][has]                  # [n,M]
+                pos_w, neg_w = wbg[gy], wbg[~gy]
+                if pos_w.numel() and neg_w.numel():
+                    # positive = GT predicates carry less background mass
+                    self.wbg_gap.append(neg_w.mean() - pos_w.mean())
+                self.aurc_conf.append(1.0 - wbg.max(-1).values)
+                self.aurc_ok.append(lg.argmax(-1) == lb)
 
     def compute(self) -> Dict[str, float]:
         out = {}
         if self.n_pred:
-            out["rel_top1"] = self.top1 / self.n_pred
-            out["rel_top5"] = self.top5 / self.n_pred
+            out["rel_top1"] = float(self.top1) / self.n_pred
+            out["rel_top5"] = float(self.top5) / self.n_pred
             pred = torch.cat(self._pred_all) if self._pred_all else torch.zeros(0)
             lab = torch.cat(self._lab_all) if self._lab_all else torch.zeros(0)
             out["rel_macro_f1"] = _macro_f1(pred, lab, self.n_cls)
-            prec = self.tp / max(self.tp + self.fp, 1)
-            rec = self.tp / max(self.tp + self.fn, 1)
+            tp, fp, fn = float(self.tp), float(self.fp), float(self.fn)
+            prec = tp / max(tp + fp, 1.0)
+            rec = tp / max(tp + fn, 1.0)
             out["rel_exist_precision"] = prec
             out["rel_exist_recall"] = rec
             out["rel_exist_f1"] = 2 * prec * rec / max(prec + rec, 1e-9)
         if self.fma:
-            out["field_fma"] = float(sum(self.fma) / len(self.fma))
+            fma = torch.cat(self.fma)
+            out["field_fma"] = float(fma.mean()) if fma.numel() else 0.0
         if self.wbg_gap:
-            out["field_wbg_gap"] = float(sum(self.wbg_gap) / len(self.wbg_gap))
+            out["field_wbg_gap"] = float(torch.stack(self.wbg_gap).mean())
         if self.aurc_conf:
             out["field_aurc"] = aurc(torch.cat(self.aurc_conf), torch.cat(self.aurc_ok))
         return out

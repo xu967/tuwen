@@ -240,41 +240,84 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         return self._compute_loss(batch, rel)
 
     def _compute_loss(self, batch, rel):
-        """v4: 七项逐图累积 → 分开平均 → 加权求和。"""
+        """v4: 整批一次前向（图像按最大框数右填充）→ 逐图七项损失 → 分开平均。"""
         device = batch["img"].device
         idx = batch["batch_idx"].long().to(device)
         bboxes = batch["bboxes"].to(device)
         cls_all = batch.get("cls")
+        if cls_all is not None:
+            cls_all = cls_all.to(device)
         relations = batch.get("relations") or []
         n_imgs = batch["img"].shape[0]
 
+        counts = torch.bincount(idx, minlength=n_imgs).long() if idx.numel() else \
+            torch.zeros(n_imgs, dtype=torch.long, device=device)
+        cnt = counts.tolist()  # 一次同步代替逐图 int(counts[i])（每图一次会掐断 GPU 流水）
+        n_max = max(max(cnt), 2)
+        boxes_pad = bboxes.new_zeros(n_imgs, n_max, 4)
+        boxes_pad[..., 2:] = 0.01  # 填充槽用 1% 小框，避免 spatial_pool 退化成零尺寸
+        cls_list, gt_list = [], []
+        off = 0
+        for i in range(n_imgs):
+            n_i = cnt[i]
+            boxes_pad[i, :n_i] = bboxes[off:off + n_i]
+            cls_list.append(cls_all[off:off + n_i].reshape(-1).long()
+                            if cls_all is not None else None)
+            off += n_i
+            rel_i = relations[i] if i < len(relations) else None
+            gt_list.append([(int(r[0]), int(r[1]), int(r[2])) for r in rel_i]
+                           if rel_i is not None and len(rel_i) else [])
+
+        # 关系头整批前向；损失仍逐图计算（七项损失内含逐图归一与 swap 对）
+        o = rel._forward_pairs(rel._batch_feats[0], boxes_pad, counts, gt_list=gt_list)
+
         sums = {k: None for k in self.LAMBDA_RA}
         n_geo_imgs = 0
-        base = rel._batch_feats[0]
+        nce_vals = []
+        field_diag = {}
         for i in range(n_imgs):
-            m_i = idx == i
-            boxes_i = bboxes[m_i]
-            if boxes_i.shape[0] < 2:
+            if cnt[i] < 2:
                 continue
-            rel_i = relations[i] if i < len(relations) else None
-            gt = [(int(r[0]), int(r[1]), int(r[2])) for r in rel_i] if rel_i is not None and len(rel_i) else []
-            cls_i = cls_all.to(device)[m_i].reshape(-1).long() if cls_all is not None else None
-            out_i = rel._compute(base[i:i+1], boxes_i.unsqueeze(0), gt_list=[gt], box_cls=cls_i)
+            out_i = {
+                "logits": o["logits"][i],
+                "sub_idx": o["sub_idx"][i], "obj_idx": o["obj_idx"][i],
+                "valid_mask": o["valid_mask"][i], "rel_logits": o["rel_logits"][i],
+                "boxes": boxes_pad[i:i + 1],
+                "geo_scores": o["geo_scores"][i:i + 1],
+                "zs": o["zs"][i:i + 1], "zo": o["zo"][i:i + 1],
+                # 本图每个槽位的 GT 谓词（-1 表示非 GT），指标累计器用它免掉 tolist()
+                "slot_labels": o["labels"][i][o["sub_idx"][i] * n_max + o["obj_idx"][i]],
+            }
+            if "field" in o:
+                out_i["cand_idx"] = o["cand_idx"][i]
+                out_i["field_cos"] = o["field_cos"][i]
+                out_i["field"] = {k: v[i] for k, v in o["field"].items()}
+            terms = rel._losses(
+                out_i, [gt_list[i]], o["q"][i:i + 1], o["q_spa"][i:i + 1],
+                o["geo19"][i:i + 1], o["is_gt"][i:i + 1], o["labels"][i:i + 1],
+                o["force"][i:i + 1], o["sub_idx"][i:i + 1], o["obj_idx"][i:i + 1],
+                o["valid_mask"][i:i + 1], o["v_obj"][i:i + 1], boxes_pad[i:i + 1],
+                o["n_boxes"], cls_list[i], box_counts=counts[i:i + 1])
             n_geo_imgs += 1
+            nce_vals.append(terms["nce"].detach())
             if out_i.get("field") is not None:
                 from ultralytics.models.yolovo.relate.field_metrics import FieldMetricAccumulator
                 if self._field_metrics is None:
                     self._field_metrics = FieldMetricAccumulator(
                         int(rel.vocab_head.W.shape[0]))
-                self._field_metrics.update(out_i, [gt])
+                self._field_metrics.update(out_i, [gt_list[i]])
+                for k, v in o.get("field_diag", {}).items():
+                    field_diag[k] = field_diag.get(k, 0.0) + v[i]  # 张量累加，末尾一次取值
             for k in self.LAMBDA_RA:
-                v = out_i[k] * self.LAMBDA_RA[k]
+                v = terms[k] * self.LAMBDA_RA[k]
                 sums[k] = v if sums[k] is None else sums[k] + v
 
-        self._rel_log = {"n_geo_imgs": n_geo_imgs,
-                         "n_pred_pairs": int((out_i.get("nce", 0) != 0).sum()) if n_geo_imgs else 0}
+        self._rel_log = {
+            "n_geo_imgs": n_geo_imgs,
+            "n_pred_pairs": int(torch.stack(nce_vals).ne(0).sum()) if nce_vals else 0,
+        }
         if n_geo_imgs:
-            self._rel_log.update({k: float(v) for k, v in out_i.get("field_diag", {}).items()})
+            self._rel_log.update({k: float(v) / n_geo_imgs for k, v in field_diag.items()})
         if n_geo_imgs == 0:
             p = next(rel.parameters())
             return 0.0 * p.sum(), torch.zeros(4, device=device)

@@ -90,3 +90,20 @@ V2 ep5 诊断：`w_bg_mean=0.482`，`delta_norm=30.32`。
 - 关系是 RelGen 几何生成的 4 谓词，不是 RA-4M 真实 `rel_annotations`；不能外推到开放谓词。
 - 1 epoch 的旧 V2 数字（`w_bg≈0.796`、FMA=-0.971）是背景桶 LayerNorm bug 下的结果，已作废。
 - 本表是管线验证，不是收敛结果，也不是论文数字。
+
+## 5. 全量 RA-4M × 100 epoch（进行中，2026-11-01 启动）
+
+- 数据：`RA-4M/data_full_monitor.yaml`
+  - train：472,344 图 / 2,668,852 框 / 4,282,531 关系 / 497 类 / 10,370 谓词
+  - 每 epoch 监控 val：1,024 张固定子集（全量 24,964 图留到最后单独验证）
+- 主模型：DIOR 20 类 `best.pt`（冻结）；`W_obj` 用 data yaml 的 497 类覆盖
+- 超参：`imgsz=640, batch=16, workers=8, lr0=1e-3, seed=0, amp=true`，其余沿用
+- 运行：`glp_full_v1_e100` → `glp_full_v2_e100`（顺序，同一张卡）
+- 日志：`logs/full_v1.log`、`logs/full_v2.log`
+- 实测速度：2,048 图全量口径 0.56 s/it（35 ms/图）；推算 4.6 h/epoch，
+  100 epoch 约 19-20 天/变体
+- 状态：首次启动正在扫描 472k 标签建 `labels.relate.cache`（约 30 分钟，一次性）
+
+### 结果
+
+未出（跑完第一个 epoch 后补训练曲线；跑完 100 epoch 后补公开指标与自定义指标）。
