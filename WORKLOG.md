@@ -409,3 +409,10 @@ GPU 与用户自己的训练进程共享，绝对值偏高，比例可信。
 | 18 | `val.py:208-210` | `F1@50` 实为 `2·R@50·mR@50/(R@50+mR@50)`，两项都是召回，没有精度项。`fitness=F1@50` 的语义与名字不符（注释里已说明是"惩罚偏科"，但对外报告别写成 F1）。 |
 | 19 | `val.py:98/150/218` | 未召回 GT 的 rank 哨兵是 `topk+1=101`，GT_MRR 每条未命中贡献 0.0099 而非 0。 |
 | 20 | `data/base.py:394` | `check_cache_ram` 用 `psutil.virtual_memory()`（宿主机 251 GiB 口径），看不到 cgroup 的 `memory.max`=58 GiB，因此任何 `cache=True` 都会被误放行。要根治需改读 cgroup v2 的 max/current。 |
+| 21 | `relate/trainer.py:188-195` + `yolovo/train.py:80,599-604` | **最严重**：排除 `set_vcte_alpha` 的 `add_default_callbacks` 全仓无人调用（且 `super()` 上没有该方法），回调照常每 epoch 执行。它遍历所有模块做 `m.alpha.fill_(factor)`，把关系头 `vocab_head.alpha`（10370 维、本应每谓词不同）覆写成常数；`factor` 在 epoch 0 = 0 → `cos=(1-α)cos_sem+αcos_spa` 退化成纯语义专家，`spa_proj/q_spa` 整条支路零梯度。同时冻结骨干的 VCTE alpha 也每轮被改（0→0.15→约 0.32），"冻结"的一级特征在漂移。实测 `runs/test/glp_proxy50k_v1_e100/weights/last.pt`：`model.31.vocab_head.alpha` 全 0。 |
+| 22 | `relate/trainer.py:173-177` + `field_metrics.py:156-177` | `self._field_metrics = None` 只写在同样死掉的 `on_train_epoch_start` 里，`compute()` 也不清空 list → 累计器从第 1 轮涨到最后一轮：日志里 FieldMetrics 是全程累计值，且每 epoch 约 30 万个 GPU 张量常驻。 |
+| 23 | `relate/trainer.py:377-388` | ontology 三张 [10370,10370] 稠密表（615 MiB）是模块上的普通 dict，随模块 pickle 进每个 checkpoint：`last.pt` 948 MB（state_dict 只有 150 MB）、`train-checkpoint.pt` 1055 MB，而后者全仓无读者。每 epoch 写 ~2.9 GB。 |
+| 24 | `relate/head.py:541-542` | 对 `logit_scale/logit_bias` 取 `detach` 想把 NCE 的梯度切断，实际留下一个非零梯度（分子仍带图、分母被当常数）。实测 detach 时 `logit_scale.grad=-5.4e-2`，不 detach 时 ≈0。应删掉这两个 detach。 |
+| 25 | `relate/loss.py` 全文件 + `nn/tasks.py:2892-2931` | v3 的四项损失实现，与 v4 七项完全对不上，还引用了不存在的 `self.rel.predicate_bank`。当前训练路径不走它（死代码），但被调用即 AttributeError。 |
+| 26 | `relate/trainer.py:94-114` | 训练 DataLoader 未传 `drop_last`，最后一个不满 batch 照常参与均值，每 epoch 影响 1 个 step。 |
+| 27 | `relate/trainer.py:325-326` | `loss_names` 是 (rel_geo, rel_exist, rel_pred, rel_swap)，`items` 顺序是 [geo, rel, nce, swap] → results.csv 的 `rel_exist` 列其实是 rel focal 项、`rel_pred` 列其实是 NCE；obj/sigmoid/bg 从不落盘。 |
