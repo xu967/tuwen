@@ -368,9 +368,17 @@ GPU 与用户自己的训练进程共享，绝对值偏高，比例可信。
   - 验证集的 GT 框与预测框**同处 letterbox 画布坐标系**（`ds[0]` 的 `bboxes` 已被变换：
     `0.117676→0.13588`，`ratio_pad=((0.6253,0.625),(16,21))`）——验证链路坐标系是对的。
   - 单测 24/24 通过（`tests/test_glp_field.py`，无 pytest，用脚本逐函数调用）。
-- `train.py`：`cache` 默认 `1` → `0`。原因：`cache=True` 会把 5 万张图解码后常驻内存，
-  实测到 38.7 GB 时进程被内核 SIGKILL（容器 cgroup `memory.max` = 58 GiB，读图产生的
-  page cache 也计入该上限）。数据加载本来有 9× 余量（270 vs 30 img/s），缓存无收益。
+- `train.py`：`cache` 默认 `1` → `0`。原因（实测口径）：
+  - `cache_images` 把 5 万张图按长边缩放到 640 的 uint8 数组常驻，平均 0.84 MiB/张 →
+    跑满 **41.0 GiB**（日志 38.7 GiB @ 47,340/49,999 外推吻合）。
+  - 同一 cgroup 里还有别的进程 ~12–13 GiB anon、训练进程自身 ~3.8 GiB、读原图的
+    page cache ≤4.2 GiB（可回收）、内核开销 ~0.4 GiB，95% 时合计 ≈58.5–60.5 GiB，
+    越过 `memory.max` = 58.0 GiB（`memory.events` 里 oom_kill=6，swap 为 0）。
+  - `check_cache_ram` 用 `psutil.virtual_memory()`，读到的是**宿主机** 251 GiB
+    （available 222 GiB），看不到 cgroup 上限，所以放行。
+  - 数据加载本来就有 9× 余量（270 vs 30 img/s），缓存对 epoch 时长没有收益；
+    `cache="disk"` 也不可行：落盘的是原图解码数组（87.6 GiB），`check_cache_disk`
+    要求 131 GiB 而卷上只剩 114 GiB，会直接放弃缓存。
 
 ### 没做什么
 
@@ -400,3 +408,4 @@ GPU 与用户自己的训练进程共享，绝对值偏高，比例可信。
 | 17 | `val.py:159-168` | `pair_existence_AP` 没有一对一匹配，同一 GT 的近重复框会产生多个正样本，AP 偏高。 |
 | 18 | `val.py:208-210` | `F1@50` 实为 `2·R@50·mR@50/(R@50+mR@50)`，两项都是召回，没有精度项。`fitness=F1@50` 的语义与名字不符（注释里已说明是"惩罚偏科"，但对外报告别写成 F1）。 |
 | 19 | `val.py:98/150/218` | 未召回 GT 的 rank 哨兵是 `topk+1=101`，GT_MRR 每条未命中贡献 0.0099 而非 0。 |
+| 20 | `data/base.py:394` | `check_cache_ram` 用 `psutil.virtual_memory()`（宿主机 251 GiB 口径），看不到 cgroup 的 `memory.max`=58 GiB，因此任何 `cache=True` 都会被误放行。要根治需改读 cgroup v2 的 max/current。 |
