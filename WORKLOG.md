@@ -45,10 +45,11 @@
   - 原因：V2 用背景桶 `w_bg` 替代，不新增 `risk_head.py`。
 - 未把 RA-4M 全量 497 类/10370 谓词接进来
   - 原因：主模型 `best.pt` 是 20 类 DIOR；当前用 20 类对齐子集，避免 `W_obj`/label 越界。
-- 未推送 GitHub
-  - 原因：已初始化独立本地仓库并提交（`da54ab2`，1012 文件），remote 设为
-    `git@github.com:xu967/YOLOVOmodal_3871538535.git`；但该仓库尚不存在，`git push` 返回
-    `ERROR: Repository not found`。需要先在 GitHub 建空仓库（不要勾 README/LICENSE），再推。
+- 已推送 GitHub：`git@github.com:xu967/tuwen.git`，分支 `main`
+  - 独立本地仓库，未触碰 ALVLN/uav_rgb/CF-Drone；使用用户新建的 `~/.ssh/tuwen_deploy`
+    （`GIT_SSH_COMMAND` 临时指定，未改 `~/.ssh/config`）。
+  - 远端已有 `Initial commit`（README），已 rebase 到其之上；当前提交
+    `e47cbd8`（代码）+ `b264315`（worklog）。
 
 ## 待确认
 
