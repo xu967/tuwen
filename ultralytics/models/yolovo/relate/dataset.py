@@ -19,6 +19,7 @@ topology, instance identity, pair indices and labels intact.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from copy import copy
 from functools import partial
@@ -75,6 +76,10 @@ def parse_rnames(rnames: Any, source: str = "data.yaml rnames") -> Dict[int, str
     if len(set(ids)) != len(ids):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         raise SyntaxError(f"{source} 中 rnames id 重复：{dupes}。")
+    if sorted(ids) != list(range(len(ids))):
+        # 静默重编号会让谓词整体错位（1-based 的 rnames 尤其危险）
+        raise SyntaxError(
+            f"{source} 中 rnames id 必须是 0..{len(ids) - 1} 连续，得到 {sorted(ids)[:5]}...")
     names = [v for _, v in sorted(items)]
     if len(set(names)) != len(names):
         dupes = sorted({n for n in names if names.count(n) > 1})
@@ -247,6 +252,10 @@ def scan_relate_label(args: Tuple) -> Tuple:
             nm = 1
             lb, relations, rel_weights, spatial_flags = empty
         return im_file, lb, shape, relations, rel_weights, spatial_flags, nm, nf, ne, nc, msg
+    except (ValueError, SyntaxError):
+        # 结构性错误（框索引越界、谓词 id 非法）必须中止；当成 corrupt 图丢掉的
+        # 话，坏标注只会退化成"训练集悄悄少了一批图"。
+        raise
     except Exception as e:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
@@ -266,6 +275,15 @@ class YOLOVORelateDataset(YOLODataset):
         self.rcoords = parse_relate_rcoords(data)
         self.rswap = parse_relate_rswap(data)
         super().__init__(*args, data=data, task=task, **kwargs)
+
+    def _cache_hash(self) -> str:
+        """标签缓存指纹：路径+字节数之外再混入谓词词表。
+
+        只看路径和文件大小时，改了 data.yaml 的 rnames（关系行内容不变）会静默
+        命中旧 cache，整份数据集按旧谓词 id 训练。
+        """
+        fp = hashlib.sha256(repr(sorted(self.rnames.items())).encode()).hexdigest()
+        return get_hash(self.label_files + self.im_files) + fp[:16]
 
     # ------------------------------------------------------------------
     # Label scanning (R-line aware, own cache file)
@@ -321,7 +339,7 @@ class YOLOVORelateDataset(YOLODataset):
             LOGGER.info("\n".join(msgs))
         if nf == 0:
             LOGGER.warning(f"{self.prefix}No labels found in {path}.")
-        x["hash"] = get_hash(self.label_files + self.im_files)
+        x["hash"] = self._cache_hash()
         x["results"] = nf, nm, ne, nc, len(self.im_files)
         x["msgs"] = msgs
         save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)

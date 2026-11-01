@@ -26,6 +26,42 @@ from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, TQDM
 from ultralytics.utils.patches import imread
 
 
+def _mem_available_total() -> Tuple[float, float]:
+    """返回 (可用, 总) 内存字节数，容器内以 cgroup 限额为准。
+
+    `psutil.virtual_memory()` 报的是宿主机口径：在 58 GiB 的容器里它看到 251 GiB，
+    于是 `check_cache_ram` 永远放行，最后被内核 OOM killer 直接 SIGKILL。
+    """
+    import psutil
+
+    mem = psutil.virtual_memory()
+    avail, total = float(mem.available), float(mem.total)
+    for base in ("/sys/fs/cgroup", "/sys/fs/cgroup/memory"):
+        max_f, cur_f = Path(base, "memory.max"), Path(base, "memory.current")
+        if not max_f.exists():  # cgroup v1
+            max_f, cur_f = Path(base, "memory.limit_in_bytes"), Path(base, "memory.usage_in_bytes")
+        if not max_f.exists():
+            continue
+        try:
+            limit = max_f.read_text().strip()
+            if limit in ("max", ""):
+                continue
+            limit_b = float(limit)
+            if limit_b >= 1 << 60:  # v1 表示"无限制"的哨兵值
+                continue
+            used_b = float(cur_f.read_text().strip())
+            for line in Path(base, "memory.stat").read_text().splitlines():
+                if line.startswith("anon "):
+                    used_b = float(line.split()[1])  # 只算不可回收的匿名页，page cache 不算
+                    break
+            total = min(total, limit_b)
+            avail = min(avail, max(0.0, limit_b - used_b))
+        except (OSError, ValueError):
+            continue
+        break
+    return avail, total
+
+
 class BaseDataset(Dataset):
     """
     Base dataset class for loading and processing image data.
@@ -391,13 +427,13 @@ class BaseDataset(Dataset):
             ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
             b += im.nbytes * ratio**2
         mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
-        mem = __import__("psutil").virtual_memory()
-        if mem_required > mem.available:
+        avail, total = _mem_available_total()
+        if mem_required > avail:
             self.cache = None
             LOGGER.warning(
                 f"{self.prefix}{mem_required / gb:.1f}GB RAM required to cache images "
                 f"with {int(safety_margin * 100)}% safety margin but only "
-                f"{mem.available / gb:.1f}/{mem.total / gb:.1f}GB available, not caching images"
+                f"{avail / gb:.1f}/{total / gb:.1f}GB available, not caching images"
             )
             return False
         return True

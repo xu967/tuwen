@@ -416,3 +416,46 @@ GPU 与用户自己的训练进程共享，绝对值偏高，比例可信。
 | 25 | `relate/loss.py` 全文件 + `nn/tasks.py:2892-2931` | v3 的四项损失实现，与 v4 七项完全对不上，还引用了不存在的 `self.rel.predicate_bank`。当前训练路径不走它（死代码），但被调用即 AttributeError。 |
 | 26 | `relate/trainer.py:94-114` | 训练 DataLoader 未传 `drop_last`，最后一个不满 batch 照常参与均值，每 epoch 影响 1 个 step。 |
 | 27 | `relate/trainer.py:325-326` | `loss_names` 是 (rel_geo, rel_exist, rel_pred, rel_swap)，`items` 顺序是 [geo, rel, nce, swap] → results.csv 的 `rel_exist` 列其实是 rel focal 项、`rel_pred` 列其实是 NCE；obj/sigmoid/bg 从不落盘。 |
+
+## 更新 2026-11-01 按审计结论修复
+
+### 做了什么（按发现编号）
+
+| # | 文件 | 改动 |
+| --- | --- | --- |
+| 21 | `relate/trainer.py::__init__` | 在 `super().__init__()` 之后直接过滤 `self.callbacks["on_train_epoch_start"]` 里 qualname 含 `vcte` 的回调；删除从未被调用的 `add_default_callbacks`。`set_vcte_alpha` 不再每轮覆写 `vocab_head.alpha` 与冻结骨干的 VCTE alpha。 |
+| 22 | `relate/trainer.py::_model_train` | `_field_metrics = None` 移到 `_model_train`（每 epoch 必走）；删除死掉的 `on_train_epoch_start`。场指标改为按 epoch 统计。 |
+| 1 | `relate/trainer.py::preprocess_batch/_compute_loss` | 预处理前把原始 cls 存成 `batch["cls_global"]`，obj 对齐损失改用它（全局类 id）索引 `W_obj`。 |
+| 2 | `relate/predict.py` | 逐图打分传入 `img_idx=bi`，batch>1 时不再共用第 0 张图的特征。 |
+| 3 | `relate/val.py::update_metrics` | 无检测时 `pred_boxes` 传空张量（原来是 GT 框，导致 DetPairRecall 恒 1.0）；evaluator 的空预测分支补记 `pair_recall_total`。 |
+| 4 | `relate/val.py::postprocess` | 归一化尺寸改用 `rel.feat_strides[rel.base_idx]`。 |
+| 8 | `relate/val.py` | `postprocess` 把 `rel.max_objects` 存到 `self._rel_max_objects`，`update_metrics` 的截断域与之一致（不再硬编码 60）。 |
+| 9 | `relate/field_metrics.py` | 无 GT 关系的图不再整张早退：存在性 tp/fp/fn 对所有有效槽位统计；`compute()` 的 top-k 与存在性指标拆成各自的 gate。 |
+| 10 | `relate/val.py::stats` | 未召回 GT 的 rank 哨兵由 `topk+1` 改为 `inf`，GT_MRR 不再给未命中贡献分。 |
+| 16 | `relate/val.py` | 删除 `_match_triplets`（返回值从未使用）与其调用；IoU 矩阵整块只算一次、`ps/po/pp` 提到循环外。 |
+| 24 | `relate/head.py::_losses` | 去掉 `logit_scale/logit_bias` 的 `.detach()`（detach 反而留下非零梯度，持续压低 logit_scale）。 |
+| 26 | `relate/trainer.py::get_dataloader` | 训练 loader 加 `drop_last=True`。 |
+| 27 | `relate/trainer.py::get_validator` | `loss_names` 改为 `("geo","rel","nce","swap")`，与 `_compute_loss` 返回的 items 顺序一致；日志删掉恒 0 的 `pairs(swap)`。 |
+| 5 | `relate/dataset.py::scan_relate_label` | `ValueError/SyntaxError` 原样上抛（框索引越界、谓词 id 非法不再被当 corrupt 图吞掉）。 |
+| 6 | `relate/dataset.py::parse_rnames` | 要求 id 必须是 `0..V-1` 连续，否则 SyntaxError；不再静默重编号。 |
+| 7 | `relate/dataset.py::_cache_hash` | 标签缓存指纹混入 `rnames` 的 sha256 前 16 位，改词表不再命中旧 cache。 |
+| 20 | `data/base.py::_mem_available_total` | `check_cache_ram` 改读 cgroup 限额（v2 `memory.max` / v1 `limit_in_bytes`），可用量按 `limit - anon` 估；容器内不再用宿主机口径放行。 |
+
+### 验证
+
+- `py_compile` 全部改动文件通过。
+- `tests/test_glp_field.py` 24/24 通过。
+- 新写 `/tmp/t_eval.py` 三个用例验证 `RelateEvaluator`：无检测（DetPairRecall=0、PairRecall 分母计入）、正确命中（全 1.0）、谓词错（R@K=0、GT_MRR=0）。用完已删。
+- 实测 `_mem_available_total()` 返回 42.8/58.0 GiB（宿主机口径是 222/251），缓存 41 GiB × 1.5 现在会被拒绝。
+
+### 没做什么
+
+- 没修 #11（非 detect 任务透传）、#12（`rswap/rel_weights/spatial_flags` 死字段）、#13/#14/#17/#18/#19/#23/#25（见下表说明）。
+- 没动 `train-checkpoint.pt` 与 ontology 入库（#23）：三个权重文件是固定路径、每轮覆盖，磁盘峰值只有约 2.9 GB，不是累计上百 GB。
+- 没有跑真实训练验证，只做了导入/单测/评测器冒烟。
+
+### 已知遗留
+
+- `F1@50` 仍是 R@50 与 mR@50 的调和平均（无精度项），`fitness` 语义未改。
+- `pair_existence_AP` 仍无一对一匹配，近重复框会抬高 AP。
+- `relate/loss.py` 与 `nn/tasks.py` 的关系分支仍是 v3 死实现。

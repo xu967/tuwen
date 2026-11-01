@@ -105,16 +105,12 @@ class FieldMetricAccumulator:
 
     @torch.no_grad()
     def update(self, out: Dict, gt_list: Sequence[Sequence[Tuple[int, int, int]]] = ()):
-        if not (gt_list and gt_list[0]):
-            return  # 与旧实现一致：本图没有 GT 关系时不计入
         logits = out["logits"].float()
         valid = out["valid_mask"].bool()
         # slot_labels 由 trainer 直接给（本图每槽位的 GT 谓词）；缺省时回退到 gt 列表反查
         labels = out.get("slot_labels")
         if labels is None:
             pair_gt = {(int(s), int(o)): int(p) for (s, o, p) in (gt_list[0] if gt_list else [])}
-            if not pair_gt:
-                return
             labels = torch.full((logits.shape[0],), -1, dtype=torch.long, device=logits.device)
             for k, (s, o) in enumerate(zip(out["sub_idx"].tolist(), out["obj_idx"].tolist())):
                 if valid[k] and (s, o) in pair_gt:
@@ -161,6 +157,7 @@ class FieldMetricAccumulator:
             pred = torch.cat(self._pred_all) if self._pred_all else torch.zeros(0)
             lab = torch.cat(self._lab_all) if self._lab_all else torch.zeros(0)
             out["rel_macro_f1"] = _macro_f1(pred, lab, self.n_cls)
+        if float(self.tp + self.fp + self.fn):
             tp, fp, fn = float(self.tp), float(self.fp), float(self.fn)
             prec = tp / max(tp + fp, 1.0)
             rec = tp / max(tp + fn, 1.0)

@@ -71,7 +71,7 @@ class YOLOVORelatePredictor(DetectionPredictor):
             from ultralytics.models.yolovo.relate.results import RelateResults
 
             new_results = []
-            for r in results:
+            for bi, r in enumerate(results):
                 boxes = r.boxes.xywhn if r.boxes is not None and len(r.boxes) else torch.zeros((0, 4))
                 boxes = boxes.cpu() if torch.is_tensor(boxes) else torch.as_tensor(boxes)
                 if boxes.shape[0] > MAX_OBJECTS_DEFAULT:
@@ -85,7 +85,9 @@ class YOLOVORelatePredictor(DetectionPredictor):
                 if rel._captured is None or boxes.shape[0] < 2:
                     rel_out = torch.zeros((0, 4))
                 else:
-                    rel_out = rel.score(boxes).cpu()
+                    # img_idx 必须传：capture 里是按 batch 顺序存的逐图特征，
+                    # 不传就永远用第 0 张图的特征给整批打分。
+                    rel_out = rel.score(boxes, img_idx=bi).cpu()
                 if sub_map is not None and rel_out.numel():
                     # 恢复原始框索引
                     rel_out[:, 0] = sub_map[rel_out[:, 0].long()].float()

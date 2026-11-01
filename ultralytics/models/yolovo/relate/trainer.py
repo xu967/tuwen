@@ -46,6 +46,15 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         # 数据 yaml 必须带 rnames（谓词词表）
         self.relate_rnames = None
         self._field_metrics = None
+        # YOLOVOTrainer.__init__ 注册了 set_vcte_alpha：它遍历所有模块做
+        # `m.alpha.fill_(factor)`，会把关系头 vocab_head.alpha（逐谓词路由门）
+        # 和冻结骨干的 VCTE alpha 一起覆写成常数。关系训练必须剔除该回调。
+        cbs = self.callbacks.get("on_train_epoch_start", [])
+        self.callbacks["on_train_epoch_start"] = [
+            c for c in cbs if "vcte" not in getattr(c, "__qualname__", "").lower()
+        ]
+        if len(cbs) != len(self.callbacks["on_train_epoch_start"]):
+            LOGGER.info("[RelateTrain] 已排除 set_vcte_alpha 回调（否则会覆写 alpha buffer）。")
 
     # ------------------------------------------------------------- model keep
 
@@ -106,6 +115,9 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
             shuffle=mode == "train",
             num_workers=workers,
             sampler=None,
+            # 丢掉最后一个不满的 batch：否则这些图在逐图均值里权重偏大，
+            # 还会和下一 epoch 的首个 batch 凑进同一个 nbs 累加步。
+            drop_last=mode == "train",
             pin_memory=False,
             collate_fn=relate_collate,
             worker_init_fn=None,
@@ -170,29 +182,17 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
                 return
             rel._ensure_fmap_proj(rel._feat_channels[rel.base_idx], device)
 
-    def on_train_epoch_start(self):
-        """每 epoch 重设冻结与 eval 状态（训练循环会把整个模型设回 train()）。"""
-        super().on_train_epoch_start()
-        self._field_metrics = None
-        self._freeze_primary()
-
     def _model_train(self):
         """覆写父类：model.train() 会把一级模块设回 train 模式（BN 统计量会漂移），
         之后立即恢复冻结与 eval。父类在 on_train_epoch_start 回调之后才调用
-        _model_train（engine/trainer.py:426→431），仅靠 epoch 回调无法覆盖。"""
+        _model_train（engine/trainer.py:426→431），仅靠 epoch 回调无法覆盖。
+
+        `_field_metrics` 也在这里重置：Mixin 上的 `on_train_epoch_start` 只是普通
+        方法，不在 `self.callbacks` 里，训练循环永远不会调它。
+        """
         super()._model_train()
+        self._field_metrics = None
         self._freeze_primary()
-
-    # -------------------------------------------------------------- callbacks
-
-    def add_default_callbacks(self):
-        super().add_default_callbacks()
-        # 排除 set_vcte_alpha 类回调（改写冻结一级模型的 alpha buffer）
-        for cb_name in ("on_train_epoch_start",):
-            cbs = self.callbacks.get(cb_name, [])
-            self.callbacks[cb_name] = [c for c in cbs if "vcte" not in getattr(c, "__qualname__", "").lower()]
-            if len(cbs) != len(self.callbacks[cb_name]):
-                LOGGER.info("[RelateTrain] 已排除 VCTE alpha 调度回调。")
 
     # --------------------------------------------------------------- optimizer
 
@@ -217,7 +217,14 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
     # ------------------------------------------------------------------ loss
 
     def preprocess_batch(self, batch):
-        """标准预处理。GT 框注入已移至 compute_batch_loss 逐图路径（单图流式废弃）。"""
+        """标准预处理。GT 框注入已移至 compute_batch_loss 逐图路径（单图流式废弃）。
+
+        父类 `YOLOVOTrainer.preprocess_batch` 会把 `batch["cls"]` 重映射成
+        batch 内文本的局部 id（0..K-1）。obj 对齐损失要索引按**全局类 id**
+        排序的 W_obj，所以先把原始 cls 存一份。
+        """
+        if batch.get("cls") is not None:
+            batch["cls_global"] = batch["cls"].clone()
         return super().preprocess_batch(batch)
 
     # 七项损失权重（RA config 原值）
@@ -244,7 +251,9 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         device = batch["img"].device
         idx = batch["batch_idx"].long().to(device)
         bboxes = batch["bboxes"].to(device)
-        cls_all = batch.get("cls")
+        # obj 对齐损失用全局类 id（preprocess_batch 存的原文）；batch["cls"] 已被
+        # YOLOVOTrainer 重映射成局部文本 id，用它索引 W_obj 会教错类别。
+        cls_all = batch.get("cls_global", batch.get("cls"))
         if cls_all is not None:
             cls_all = cls_all.to(device)
         relations = batch.get("relations") or []
@@ -337,7 +346,6 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
             LOGGER.info(
                 f"[RelateTrain] imgs(geo/exist)={self._rel_log.get('n_geo_imgs', 0)} "
                 f"pairs(pred)={self._rel_log.get('n_pred_pairs', 0)} "
-                f"pairs(swap)={self._rel_log.get('n_swap_pairs', 0)} "
                 f"field={ {k: round(v, 5) for k, v in self._rel_log.items() if k.startswith(('gamma', 'delta', 'w_bg'))} }"
             )
             if self._field_metrics is not None:
@@ -354,7 +362,8 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
 
         task = self.args.task if self.args.task in ("detect", "segment", "obb", "pose") else "detect"
         v_cls = make_relate_validator(task)
-        self.loss_names = ("rel_geo", "rel_exist", "rel_pred", "rel_swap")
+        # 顺序必须与 _compute_loss 返回的 items 一致：[geo, rel, nce, swap]
+        self.loss_names = ("geo", "rel", "nce", "swap")
         v = v_cls(dataloader=self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks)
         v.relate_info = getattr(self.model, "relate_info", None) or {}
         self.validator = v

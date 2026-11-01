@@ -29,32 +29,6 @@ def _xywh2xyxy(b: torch.Tensor) -> torch.Tensor:
     return torch.stack([x1, y1, x2, y2], dim=1)
 
 
-def _match_triplets(pred_boxes, pred_rels, gt_boxes, gt_rels, iou_thr=0.5):  # noqa: C901
-    """三元组匹配：IoU(sub)≥thr 且 IoU(obj)≥thr 且谓词相同。
-
-    pred_rels [P,4](s,o,pid,score)、gt_rels [R,3]。返回 hit [R] bool（GT 召回）与
-    pred_hit [P] bool（预测命中任一 GT）。
-    """
-    gt_rels = gt_rels if gt_rels is not None else torch.zeros((0, 3))
-    pred_rels = pred_rels if pred_rels is not None else torch.zeros((0, 4))
-    R = gt_rels.shape[0]
-    P = pred_rels.shape[0] if pred_rels is not None else 0
-    hit = torch.zeros(max(R, 0), dtype=torch.bool)
-    pred_hit = torch.zeros(max(P, 0), dtype=torch.bool)
-    if R == 0 or P == 0:
-        return hit, pred_hit
-    iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes))  # [R_gt_boxes, N_pred_boxes]
-    ps, po = pred_rels[:, 0].long(), pred_rels[:, 1].long()
-    pp = pred_rels[:, 2].long()
-    for r in range(R):
-        gs, go, gp = int(gt_rels[r, 0]), int(gt_rels[r, 1]), int(gt_rels[r, 2])
-        ok = (iou[gs, ps] >= iou_thr) & (iou[go, po] >= iou_thr) & (pp == gp)
-        if ok.any():
-            hit[r] = True
-            pred_hit |= ok
-    return hit, pred_hit
-
-
 class RelateEvaluator:
     """分层指标累计器（纯 torch，图粒度）。"""
 
@@ -95,7 +69,9 @@ class RelateEvaluator:
         R = gt_rels.shape[0] if gt_rels is not None and gt_rels.numel() else 0
         self.gt_total += R
         if pred_rels is None or pred_rels.numel() == 0:
-            self.gt_ranks.extend([topk + 1] * R)
+            self.gt_ranks.extend([float("inf")] * R)  # 未召回的 GT 不该给 MRR 贡献分
+            # 无预测时也要进 PairRecall 分母，否则"一条都没预测出来"的图会被整体剔除
+            self.pair_recall_total += R
             for r in range(R):
                 pid = int(gt_rels[r, 2])
                 self.mrecall_total[pid] = self.mrecall_total.get(pid, 0) + 1
@@ -107,9 +83,12 @@ class RelateEvaluator:
         order = pred_rels[:, 3].argsort(descending=True)  # 融合分排序（R@K 用）
         pred_sorted = pred_rels[order]
 
-        if R:
-            iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes))
+        ps, po = pred_sorted[:, 0].long(), pred_sorted[:, 1].long()
+        pp = pred_sorted[:, 2].long()
+        # 同一张 IoU 矩阵下面三处复用（原来每处各算一遍）
+        iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes)) if R else None
 
+        if R:
             # DetPairRecall：GT 两端框各自是否有任一检测框 IoU≥thr（不看配对）
             endp_ok = ((iou >= self.iou_thr).any(dim=1))  # [R_gt] 每个GT框
             for r in range(R):
@@ -117,37 +96,26 @@ class RelateEvaluator:
                 self.det_pair_total += 1
                 self.det_pair_hits += int(bool(endp_ok[gs]) and bool(endp_ok[go]))
 
-            # PairRecall：有序对出现在候选里
-            ps, po = pred_sorted[:, 0].long(), pred_sorted[:, 1].long()
-            for r in range(R):
-                gs, go = int(gt_rels[r, 0]), int(gt_rels[r, 1])
-                paired = ((iou[gs, ps] >= self.iou_thr) & (iou[go, po] >= self.iou_thr)).any()
-                self.pair_recall_total += 1
-                self.pair_recall_hits += int(paired)
-                pid = int(gt_rels[r, 2])
-                self.mrecall_total[pid] = self.mrecall_total.get(pid, 0) + 1
-
-            # predicate_acc（v3 分母）：两端框匹配的标注对；分子=最高谓词命中
-            pa_pp = pred_sorted[:, 2].long()
+            # PairRecall + predicate_acc（v3 分母）：两端框匹配的标注对
             for r in range(R):
                 gs, go, gp = int(gt_rels[r, 0]), int(gt_rels[r, 1]), int(gt_rels[r, 2])
                 end_match = (iou[gs, ps] >= self.iou_thr) & (iou[go, po] >= self.iou_thr)
-                if end_match.any():
+                self.pair_recall_total += 1
+                paired = bool(end_match.any())
+                self.pair_recall_hits += int(paired)
+                self.mrecall_total[gp] = self.mrecall_total.get(gp, 0) + 1
+                if paired:
                     self.pa_total += 1
                     # 分子=该对最高分谓词==标注：取首个匹配行（融合分排序下的 argmax 记录）
-                    self.pa_correct += int(int(pa_pp[end_match.nonzero()[0, 0]]) == gp)
+                    self.pa_correct += int(int(pp[end_match.nonzero()[0, 0]]) == gp)
 
         # 三元组 R@K / mR@K（graph-constrained，融合分排序）
-        hit, pred_hit = _match_triplets(pred_boxes, pred_sorted, gt_boxes, gt_rels, self.iou_thr)
-        ph_sorted = pred_hit if pred_hit.numel() else pred_hit
         for r in range(R):
             pid = int(gt_rels[r, 2])
-            iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes))
-            ps, po, pp = pred_sorted[:, 0].long(), pred_sorted[:, 1].long(), pred_sorted[:, 2].long()
             gs, go, gp = int(gt_rels[r, 0]), int(gt_rels[r, 1]), int(gt_rels[r, 2])
             ok = (iou[gs, ps] >= self.iou_thr) & (iou[go, po] >= self.iou_thr) & (pp == gp)
             pos = ok.nonzero(as_tuple=False)
-            rank = int(pos[0, 0]) + 1 if pos.numel() else topk + 1
+            rank = int(pos[0, 0]) + 1 if pos.numel() else float("inf")
             self.gt_ranks.append(rank)
             for k in self.recall_hits:
                 if rank <= k:
@@ -159,8 +127,6 @@ class RelateEvaluator:
         exist_scores = pred_sorted[:, 4] if pred_sorted.shape[1] >= 5 else pred_sorted[:, 3]
         if R:
             matched_gt = torch.zeros(pred_sorted.shape[0], dtype=torch.bool)
-            iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes))
-            ps, po = pred_sorted[:, 0].long(), pred_sorted[:, 1].long()
             for r in range(R):
                 gs, go = int(gt_rels[r, 0]), int(gt_rels[r, 1])
                 matched_gt |= (iou[gs, ps] >= self.iou_thr) & (iou[go, po] >= self.iou_thr)
@@ -215,8 +181,8 @@ class RelateEvaluator:
             out["PairRecall"] = (
                 self.pair_recall_hits / self.pair_recall_total if self.pair_recall_total else 0.0
             )
-            ranks = [min(r, 10**6) for r in self.gt_ranks]
-            out["GT_MRR"] = sum(1.0 / r for r in ranks) / max(1, len(ranks))
+            ranks = self.gt_ranks
+            out["GT_MRR"] = sum(1.0 / r for r in ranks if r != float("inf")) / max(1, len(ranks))
         return out
 
 
@@ -300,11 +266,15 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
         if rel is None:
             return results
         rel.capture = False
+        # update_metrics 的截断域要和这里一致（max_objects 不是常量 60）
+        self._rel_max_objects = int(getattr(rel, "max_objects", 60))
         cap = rel._captured
         ih, iw = 640, 640
         if cap and cap.get("feats"):
             fh, fw = cap["feats"][0].shape[-2:]
-            ih, iw = fh * rel.feat_strides[0], fw * rel.feat_strides[0]
+            # capture 存的是 base_idx（P4）的特征，不是第 0 个接线层
+            stride = rel.feat_strides[rel.base_idx]
+            ih, iw = fh * stride, fw * stride
         for bi, r in enumerate(results if isinstance(results, list) else [results]):
             if not isinstance(r, dict) or "bboxes" not in r:
                 continue
@@ -346,8 +316,9 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
             if isinstance(det, dict) and det.get("bboxes") is not None and len(det["bboxes"]):
                 b = det["bboxes"]
                 conf = det.get("conf")
-                if conf is not None and b.shape[0] > 60:  # 与 postprocess 截断一致（max_objects）
-                    keep = conf.squeeze(-1).topk(60).indices
+                max_obj = int(getattr(self, "_rel_max_objects", 60))
+                if conf is not None and b.shape[0] > max_obj:  # 与 postprocess 截断一致
+                    keep = conf.squeeze(-1).topk(max_obj).indices
                     b = b[keep]
                 wh = (b[:, 2:4] - b[:, 0:2]).clamp(min=0)
                 cx = (b[:, 0] + b[:, 2]) / 2
@@ -355,7 +326,8 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
                 ih, iw = batch["img"].shape[-2:]
                 pred_boxes = _t.stack([cx / iw, cy / ih, wh[:, 0] / iw, wh[:, 1] / iw], dim=1).cpu()
             else:
-                pred_boxes = labels
+                # 没有检测框 ≠ "预测框就是 GT 框"。用 GT 会让 DetPairRecall 恒 1.0。
+                pred_boxes = _t.zeros((0, 4))
             # SGCls protocol: oracle GT boxes, re-score with captured features.
             # The old code accepted `protocol` but never branched, silently
             # reporting SGDet numbers under the SGCls label.

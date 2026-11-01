@@ -536,10 +536,12 @@ class YOLOVORelate(nn.Module):
 
         # 全词表 cosine 直接由 out["logits"] 还原：dual-score 就是 cos*scale+bias，
         # 已含 field 候选列的 scatter。原实现每图重算 [K,512]@[512,V] 两遍（forward 2 次 + backward 4 次），
-        # 单项 4.9 ms/图，是 _losses 里最大开销。affine 取 detach：NCE 作用在 raw cos 上，
-        # 本就不该回传到 logit_scale/bias（RA 规则）。
-        scale = self.vocab_head.logit_scale.exp().clamp(max=100.0).detach()
-        cos_all = (out["logits"] - self.vocab_head.logit_bias.detach()) / scale
+        # 单项 4.9 ms/图，是 _losses 里最大开销。
+        # 不给 scale/bias 加 detach：两者都带图时 NCE 对仿射参数的梯度精确抵消
+        # （NCE 只作用于 cos）；detach 反而留下 Σ f_c·cos_c 的非零梯度，持续把
+        # logit_scale 往下压。
+        scale = self.vocab_head.logit_scale.exp().clamp(max=100.0)
+        cos_all = (out["logits"] - self.vocab_head.logit_bias) / scale
 
         # 1. InfoNCE (batch-local: within-image columns; hard negatives by neg_lw)
         if has_gt.any():
