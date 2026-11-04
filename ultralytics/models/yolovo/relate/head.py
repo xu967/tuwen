@@ -83,11 +83,19 @@ class _VocabHead(nn.Module):
             # gate_mlp 只提供初值；之后 alpha 由 NCE/场损失自己学。
             self.alpha = nn.Parameter(a)
 
+    def _alpha(self) -> torch.Tensor:
+        """混合系数必须落在 [0,1]（旧 ckpt 实测跑到 [−0.55, 1.52]）。
+
+        直通式截断：前向用截断值，反向仍是恒等梯度，能把跑到区间外的 alpha 拉回来。
+        """
+        a = self.alpha
+        return a + (a.clamp(0.0, 1.0) - a).detach()
+
     def score_query_dual(self, q_sem: torch.Tensor, q_spa: torch.Tensor) -> torch.Tensor:
         """Per-predicate mixture of the two experts' cosines, scaled and shifted."""
         if self.W.numel() == 0:
             raise RuntimeError("no vocabulary installed")
-        alpha = self.alpha
+        alpha = self._alpha()
         cos_sem = F.normalize(q_sem, dim=-1) @ self.W.T
         cos_spa = F.normalize(q_spa, dim=-1) @ self.W.T
         cos = (1.0 - alpha) * cos_sem + alpha * cos_spa
@@ -102,7 +110,7 @@ class _VocabHead(nn.Module):
         Returns ``(cos, logit)`` each ``[B,K,M]``.
         """
         Wc = self.W[cand]                                # [B,K,M,D]
-        a = self.alpha[cand].unsqueeze(-1)               # [B,K,M,1]
+        a = self._alpha()[cand].unsqueeze(-1)            # [B,K,M,1]
         cos_sem = (F.normalize(q_sem, dim=-1) * Wc).sum(-1)
         cos_spa = (F.normalize(q_spa, dim=-1) * Wc).sum(-1)
         cos = (1.0 - a.squeeze(-1)) * cos_sem + a.squeeze(-1) * cos_spa
@@ -244,8 +252,9 @@ class YOLOVORelate(nn.Module):
             else FieldConfig(mode="off")
         # 场残差范数上限：早期健康值在 8~25，超过 16 后开始发散（见 _forward_pairs）。
         self.field_delta_max = 16.0
-        # 候选列与 raw 检索分数的合成方式：field（覆写，原行为）| max（只加分）| raw（不用场）
-        self.field_fuse = "field"
+        # 候选列与 raw 检索分数的合成方式：max（只加分，默认）| field（覆写）| raw（不用场）。
+        # 覆写在评测时把检索头的赢家压低（实测 acc −2.9pp），max 让场头只能轻推。
+        self.field_fuse = "max"
         self.field_read: Optional[PredicateFieldRead] = None
         self.q_res_proj: Optional[nn.Module] = None
         if self.field_cfg.mode != "off":
@@ -363,6 +372,9 @@ class YOLOVORelate(nn.Module):
         device = boxes_b.device
 
         v_obj = self.spatial_pool(F_map, boxes_b)             # [B,N,768]
+        # 未注入类别的版本留给 obj 对齐损失：注入项本身就含 W_obj[cid]，
+        # 用它做 CE 等于让 cls_proj 自答（实测 CE 2.05 vs 5.96，base top-1 0/55）。
+        v_obj_base = v_obj
         # getattr：d8a1d3f 之前的 ckpt 没有 cls_proj，不能懒建一个随机层，
         # 旧权重本来就没训过它，跳过注入即可（与训练时的口径一致）。
         cls_proj = getattr(self, "cls_proj", None)
@@ -379,6 +391,12 @@ class YOLOVORelate(nn.Module):
             is_gt, labels = _gt_grid(gt_list, B, N, device)
             if self.sampler.swap_include:
                 swapped = is_gt.reshape(B, N, N).transpose(1, 2).reshape(B, N * N)
+                # 对称谓词的反向对不是负例：不强制入候选，否则它会被 sigmoid/bg/geo/rel
+                # 当负样本训练（实测 70% 的行属于这种情况）。反向本就标注的行由
+                # swap hinge 里的 gt_sym 判断跳过，这里不重复。
+                if self.onto is not None and "sym" in self.onto:
+                    sym_cell = self.onto["sym"].to(device)[labels.clamp(min=0)] & is_gt
+                    swapped = swapped & ~sym_cell.reshape(B, N, N).transpose(1, 2).reshape(B, N * N)
                 force = is_gt | swapped
             else:
                 force = is_gt
@@ -485,7 +503,8 @@ class YOLOVORelate(nn.Module):
                "boxes": boxes_b, "n_boxes": N, "q": q, "q_spa": q_spa,
                "geo19": geo19, "is_gt": is_gt, "labels": labels, "force": force,
                "gt_slots": gt_slots,
-               "box_counts": box_counts, "geo_scores": geo_scores, "zs": zs, "zo": zo}
+               "box_counts": box_counts, "geo_scores": geo_scores, "zs": zs, "zo": zo,
+               "v_obj_base": v_obj_base}
         if self.field_read is not None:
             if self.vocab_head.W.device != logits.device:
                 self.vocab_head.W = self.vocab_head.W.to(logits.device)
@@ -559,7 +578,7 @@ class YOLOVORelate(nn.Module):
                "valid_mask": o["valid_mask"][0], "rel_logits": o["rel_logits"][0],
                "logits": o["logits"][0], "v_obj": o["v_obj"], "boxes": boxes_b,
                "n_boxes": o["n_boxes"], "geo_scores": o["geo_scores"],
-               "zs": o["zs"], "zo": o["zo"]}
+               "zs": o["zs"], "zo": o["zo"], "v_obj_base": o["v_obj_base"]}
         # _losses 用 out.get("logits_raw", out["logits"]) 兜底；不往外传会静默 fallback
         # 到场散列后的 logits，NCE 凭空低 0.6 nat，而检索排序毫无改善。
         if "logits_raw" in o:
@@ -637,21 +656,20 @@ class YOLOVORelate(nn.Module):
             cos = cos_all[has_gt]
             logits_n = cos / 0.07
             neg_lw = self.onto["neg_lw"] if self.onto else torch.ones(V, V, device=device)
-            pos_mask = self.onto["pos_mask"] if self.onto else torch.eye(V, dtype=torch.bool, device=device)
             inv_mask = self.onto["inverse_mask"] if self.onto else torch.zeros(V, V, dtype=torch.bool, device=device)
             hot_b = hot.bool()
             a_idx, g_idx = hot_b.nonzero(as_tuple=True)
             # 稀疏行 gather 代替 hot @ [V,V]：10k 谓词时后者每图要读 430MB 权重表。
-            pos_any = torch.zeros_like(hot)
-            pos_any.index_add_(0, a_idx, pos_mask[g_idx].to(hot.dtype))
             inv_any = torch.zeros_like(hot)
             inv_any.index_add_(0, a_idx, inv_mask[g_idx].to(hot.dtype))
             # neg_lw 是乘性权重 ∈[0.25,1]（ontology.py）；作为 log 偏置必须取 log
             # （≤0），直接相加等于把远负例抬高 +0.25~+1.0、近义列反而零偏置。
             # 同一槽位多个 GT 时 log 相加 = 权重连乘，与「都要区分」一致。
+            # 近义列保留折扣（这是最难也最该降权的负例）；只有反义列豁免。
             lw = torch.zeros_like(hot)
             lw.index_add_(0, a_idx, neg_lw[g_idx].clamp_min(1e-8).log())
-            lw = lw.masked_fill((pos_any > 0) | (inv_any > 0), 0.0)
+            lw = lw.masked_fill(inv_any > 0, 0.0)
+            lw[a_idx, g_idx] = 0.0  # GT 列自身不吃折扣（对角 neg_lw=0 → log 后 −18.4）
             den = torch.logsumexp(logits_n + lw, dim=-1)
             per = den[a_idx] - logits_n[a_idx, g_idx]
             terms["nce"] = per.mean()
@@ -694,7 +712,9 @@ class YOLOVORelate(nn.Module):
             n_al = len(box_cls)
             assert n_al == n_b, (
                 f"obj loss alignment: box_cls ({n_al}) != valid boxes ({n_b})")
-            feats_al = v_obj[0][:n_al]
+            # 用未注入类别的特征做对齐：v_obj 里已含 cls_proj(W_obj[cid])，拿它做 CE
+            # 等于让 cls_proj 自答，视觉对齐项拿不到梯度。
+            feats_al = out.get("v_obj_base", v_obj)[0][:n_al]
             labels_al = box_cls[:n_al].to(device).long()
             obj_loss = q.new_zeros(())
             for proj in (self.sub_text_proj, self.obj_text_proj):

@@ -327,6 +327,9 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
             }
             if "logits_raw" in o:
                 out_i["logits_raw"] = o["logits_raw"][i]
+            # 未注入类别的 v_obj：obj 对齐损失用它，否则 cls_proj 自答
+            if "v_obj_base" in o:
+                out_i["v_obj_base"] = o["v_obj_base"][i:i + 1]
             if "field" in o:
                 out_i["cand_idx"] = o["cand_idx"][i]
                 out_i["field_cos"] = o["field_cos"][i]

@@ -1607,3 +1607,38 @@ SGDet 的 pair_acc 不再只对"至少产出一条候选"的图求值。
 - 重跑 `field_fuse=max` 的 PredCls 验证，指标与修复前逐位一致
   （R@50=0.4344、predicate_acc=0.4452、pair_acc=0.5494、pair_acc@3=0.7748），
   且验证结束后 `field_fuse` 已还原为 `field`。
+
+---
+
+## 更新 2026-11-04 训练目标优化（第二轮）
+
+### 做了什么
+
+基于上一轮的量化证据，改掉五处训练目标缺陷：
+
+1. **`cls_proj` 泄漏**：`_forward_pairs` 保留未注入类别的 `v_obj_base`，`_losses` 的 obj
+   对齐损失改用它；trainer 的 `out_i` 同步透传。原实现里 CE 可以直接由注入的
+   `W_obj[cid]` 解出（实测 CE 2.05 vs 5.96，base-only top-1 0/55）。
+2. **`neg_lw` 近义列**：`ontology.py` 不再把 `pos_mask` 列设回 1.0；`head.py` 只豁免反义列，
+   并把 GT 列显式置 0。近义列现在保留 closeness 折扣（实测 88.8% 的列 <1，中位 0.757），
+   原先它们吃掉 NCE 分母 41.9% 的 softmax 质量。
+3. **`sym` 改显式对称表**：新增 `SYMMETRIC_PREDICATES`，实测 2809 个谓词里只有 8 个
+   （0.28%）被判为对称，swap 方向损失不再被 96.97% 的豁免吞掉。
+4. **对称谓词的反向对不再强制入候选**：`force = is_gt | swapped` 改为跳过 `sym[p]=True`
+   的反向对，避免它们被 sigmoid/bg/geo/rel 当负例（原先覆盖 70% 的关系行）。
+5. **`alpha` 直通式截断到 [0,1]**：旧 ckpt 实测跑到 [−0.55, 1.52]，超出混合权重的定义域。
+
+另：`field_fuse` 默认值改为 `max`（训练与评测一致，场头只能加分不能覆盖检索头）。
+
+### 验证
+
+- `py_compile` 通过；`tests/test_glp_field.py` 24/24。
+- 真实词表上复核：sym 8/2809；neg_lw 中位 0.757。
+- 1 轮冒烟（1024 图）：无报错，`train/swap` 从 0.0139 升到 0.0259（swap 首次覆盖全词表）。
+
+### 没做什么
+
+- 没有改 `n_candidates`（实测 M=8 最优）、budget、lr、batch、seed。
+- 没有改 `SYMMETRIC_PREDICATES` 之外的对称判定逻辑：该表是按 VG 常见谓词手写的，
+  不是从标注统计学出来的。
+- 没有重跑全量 val 做交叉验证。
