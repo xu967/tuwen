@@ -352,7 +352,9 @@ class YOLOVORelateDataset(YOLODataset):
         try:
             cache, exists = load_dataset_cache_file(cache_path), True
             assert cache["version"] == DATASET_CACHE_VERSION
-            assert cache["hash"] == get_hash(self.label_files + self.im_files)
+            # 必须用 _cache_hash()：它比 get_hash() 多混了词表指纹，拿裸
+            # get_hash() 比对永远不等，缓存从未被复用（每次构建都全量重扫）。
+            assert cache["hash"] == self._cache_hash()
         except (FileNotFoundError, AssertionError, AttributeError, KeyError):
             cache, exists = self.cache_labels(cache_path), False
 
@@ -533,7 +535,10 @@ def build_relate_dataset(
         batch_size=batch,
         augment=mode == "train",
         hyp=cfg,
-        rect=cfg.rect or mode == "val",
+        # rect 必须与训练保持一致：训练是方形 640 letterbox，验证原本被强制成矩形，
+        # 实测 1024×768 下图归一化坐标差 0.0586，59% 的 GT 框中心偏移 >0.01、
+        # 箱高比均值 1.259——是系统性的 train→val 协变量偏移，不是噪声。
+        rect=bool(getattr(cfg, "rect", False)),
         cache=cfg.cache or None,
         single_cls=cfg.single_cls or False,
         stride=int(stride),

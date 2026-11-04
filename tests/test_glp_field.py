@@ -413,14 +413,15 @@ def test_batched_forward_matches_per_image_losses():
             "cand_idx": o["cand_idx"][i], "field_cos": o["field_cos"][i],
             "field": {k: v[i] for k, v in o["field"].items()},
         }
+        if "logits_raw" in o:
+            out_i["logits_raw"] = o["logits_raw"][i]
         batched = rel._losses(
-            out_i, [gt[i]], o["q"][i:i + 1], o["q_spa"][i:i + 1], o["geo19"][i:i + 1],
-            o["is_gt"][i:i + 1], o["labels"][i:i + 1], o["force"][i:i + 1],
+            out_i, [gt[i]], o["q"][i:i + 1], o["is_gt"][i:i + 1],
             o["sub_idx"][i:i + 1], o["obj_idx"][i:i + 1], o["valid_mask"][i:i + 1],
             o["v_obj"][i:i + 1], boxes[i:i + 1], o["n_boxes"], cls[i],
             box_counts=counts[i:i + 1])
         n = int(counts[i])
         single = rel._compute(base[i:i + 1], boxes[i:i + 1, :n],
-                              gt_list=[gt[i]], box_cls=cls[i])
+                              gt_list=[gt[i]], box_cls=cls[i].unsqueeze(0))
         for k in ("nce", "swap", "sigmoid", "obj", "bg", "geo", "rel"):
             assert abs(float(batched[k]) - float(single[k])) < 1e-4, (i, k, batched[k], single[k])

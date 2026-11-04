@@ -53,12 +53,21 @@ def field_mass_in_box(field: Dict[str, torch.Tensor], box: torch.Tensor) -> torc
     return (w * gaussian_box_mass(mu, sigma, box)).sum(-1)
 
 
-def _topk_correct(logits: torch.Tensor, labels: torch.Tensor, k: int) -> torch.Tensor:
-    """命中数（张量，调用方在 epoch 末才取值，避免逐图同步）。"""
+def _topk_hit(logits: torch.Tensor, labels: torch.Tensor, k: int) -> torch.Tensor:
+    """逐 GT 行：top-k 是否命中该行自己的谓词。"""
     if labels.numel() == 0:
-        return torch.zeros((), dtype=torch.long, device=logits.device)
+        return torch.zeros(0, dtype=torch.bool, device=logits.device)
     top = logits.topk(min(k, logits.shape[-1]), dim=-1).indices
-    return (top == labels.unsqueeze(-1)).any(-1).sum()
+    return (top == labels.unsqueeze(-1)).any(-1)
+
+
+def _slot_hit(hit: torch.Tensor, si: torch.Tensor, n_slots: int) -> torch.Tensor:
+    """GT 行级命中 -> 槽位级命中数：一个有序对命中任一 GT 谓词即算对。"""
+    if hit.numel() == 0:
+        return torch.zeros((), dtype=torch.long, device=hit.device)
+    acc = torch.zeros(n_slots, dtype=torch.long, device=hit.device)
+    acc.scatter_add_(0, si, hit.long())
+    return (acc > 0).sum()
 
 
 def _macro_f1(pred: torch.Tensor, labels: torch.Tensor, n_cls: int) -> float:
@@ -66,9 +75,11 @@ def _macro_f1(pred: torch.Tensor, labels: torch.Tensor, n_cls: int) -> float:
     if labels.numel() == 0:
         return 0.0
     tp = torch.bincount(labels[pred == labels], minlength=n_cls).float()
-    denom = torch.bincount(pred, minlength=n_cls).float() + \
-        torch.bincount(labels, minlength=n_cls).float()
-    keep = denom > 0
+    # 分母只按 GT 类：2809 类里被 argmax 偶然输出一次的 predicted-only 类会被
+    # 恒记为 F1=0，把宏平均压成常数噪声（原实现是 pred+label 的并集）。
+    lab_count = torch.bincount(labels, minlength=n_cls).float()
+    denom = torch.bincount(pred, minlength=n_cls).float() + lab_count
+    keep = lab_count > 0
     if not keep.any():
         return 0.0
     return float((2 * tp[keep] / denom[keep]).mean())
@@ -95,7 +106,7 @@ class FieldMetricAccumulator:
         self.n_pred = 0
         # 累计量保持张量形态，只在 compute()（epoch 末）取一次值：
         # 逐图 .item()/.tolist() 每个 batch 要掐断 16 次 GPU 流水。
-        self.top1 = self.top5 = self.tp = self.fp = self.fn = 0
+        self.top1 = self.top5 = self.tp = self.fp = self.fn = self.cand_hit = 0
         self.fma: List[torch.Tensor] = []
         self.wbg_gap: List[torch.Tensor] = []
         self.aurc_conf: List[torch.Tensor] = []
@@ -105,43 +116,59 @@ class FieldMetricAccumulator:
 
     @torch.no_grad()
     def update(self, out: Dict, gt_list: Sequence[Sequence[Tuple[int, int, int]]] = ()):
-        logits = out["logits"].float()
+        # 训练时 GT 被强制塞进候选，散列后的 top1 恒≈1（构造出来的假象）；
+        # 指标必须用未散列的检索分数，才和推理口径（raw top-M）对齐。
+        logits = out.get("logits_raw", out["logits"]).float()
         valid = out["valid_mask"].bool()
-        # slot_labels 由 trainer 直接给（本图每槽位的 GT 谓词）；缺省时回退到 gt 列表反查
-        labels = out.get("slot_labels")
-        if labels is None:
-            pair_gt = {(int(s), int(o)): int(p) for (s, o, p) in (gt_list[0] if gt_list else [])}
-            labels = torch.full((logits.shape[0],), -1, dtype=torch.long, device=logits.device)
+        # GT 用 (slot, pred) 稀疏行表示：同一有序对可以有多个谓词，last-wins 的单标签
+        # 会把第 2..k 个谓词记成「预测错误」。
+        gt = out.get("slot_gt")
+        if gt is None:
+            pair_gt: Dict[Tuple[int, int], List[int]] = {}
+            for (s, o, p) in (gt_list[0] if gt_list else []):
+                pair_gt.setdefault((int(s), int(o)), []).append(int(p))
+            sk, pk = [], []
             for k, (s, o) in enumerate(zip(out["sub_idx"].tolist(), out["obj_idx"].tolist())):
-                if valid[k] and (s, o) in pair_gt:
-                    labels[k] = pair_gt[(s, o)]
-        labels = torch.where(valid, labels.long(), torch.full_like(labels.long(), -1))
-        has = labels >= 0
-
-        lg, lb = logits[has], labels[has]
-        self.n_pred += int(lb.numel())
-        if lb.numel():
-            self.top1 = self.top1 + _topk_correct(lg, lb, 1)
-            self.top5 = self.top5 + _topk_correct(lg, lb, 5)
+                if valid[k]:
+                    for p in pair_gt.get((s, o), ()):
+                        sk.append(k)
+                        pk.append(p)
+            gt = (torch.tensor(sk, dtype=torch.long, device=logits.device),
+                  torch.tensor(pk, dtype=torch.long, device=logits.device))
+        si, lb = gt
+        K = logits.shape[0]
+        slot_has = torch.zeros(K, dtype=torch.bool, device=logits.device)
+        if si.numel():
+            slot_has.scatter_(0, si, True)
+            self.n_pred = self.n_pred + slot_has.sum()
+            lg = logits[si]
+            # 检索口径的 GT 是否落进 field 候选：cand_idx 是「强制塞入 GT」之后的候选表，
+            # 拿它比对恒为 1，必须用未散列的检索分数重新取 top-M（推理时就是这么取的）。
+            if "cand_idx" in out:
+                k = int(out["cand_idx"].shape[-1])
+                self.cand_hit = self.cand_hit + _slot_hit(
+                    (lg.topk(k, dim=-1).indices == lb.unsqueeze(-1)).any(-1), si, K)
+            self.top1 = self.top1 + _slot_hit(_topk_hit(lg, lb, 1), si, K)
+            self.top5 = self.top5 + _slot_hit(_topk_hit(lg, lb, 5), si, K)
             self._pred_all.append(lg.argmax(-1))
             self._lab_all.append(lb)
 
-        # existence P/R/F1 over all valid pairs (threshold 0.5)
+        # existence P/R/F1 over all valid pairs (threshold 0.5)；无 GT 的图也要计 fp
         exist = torch.sigmoid(out["rel_logits"].float()[valid]) >= 0.5
-        pos = has[valid]
+        pos = slot_has[valid]
         self.tp = self.tp + (exist & pos).sum()
         self.fp = self.fp + (exist & ~pos).sum()
         self.fn = self.fn + (~exist & pos).sum()
 
-        if "field" in out and "cand_idx" in out and lb.numel():
+        if si.numel() and "field" in out and "cand_idx" in out:
             field = out["field"]
             cand = out["cand_idx"]                       # [K,M]
             obj_box = out["boxes"][0][out["obj_idx"]]    # [K,4]
             mass = field_mass_in_box(field, obj_box)     # [K,M]
-            gy = cand[has] == lb.unsqueeze(-1)           # [n,M]
-            self.fma.append(((2 * mass[has] - 1).clamp(-1, 1))[gy])
+            gy = cand[si] == lb.unsqueeze(-1)            # [G,M]
+            self.fma.append(((2 * mass[si] - 1).clamp(-1, 1))[gy])
             if "w_bg" in field:
-                wbg = field["w_bg"][has]                  # [n,M]
+                wbg = field["w_bg"][si]                   # [G,M]
                 pos_w, neg_w = wbg[gy], wbg[~gy]
                 if pos_w.numel() and neg_w.numel():
                     # positive = GT predicates carry less background mass
@@ -152,11 +179,13 @@ class FieldMetricAccumulator:
     def compute(self) -> Dict[str, float]:
         out = {}
         if self.n_pred:
-            out["rel_top1"] = float(self.top1) / self.n_pred
-            out["rel_top5"] = float(self.top5) / self.n_pred
+            n_pred = float(self.n_pred)
+            out["rel_top1"] = float(self.top1) / n_pred
+            out["rel_top5"] = float(self.top5) / n_pred
             pred = torch.cat(self._pred_all) if self._pred_all else torch.zeros(0)
             lab = torch.cat(self._lab_all) if self._lab_all else torch.zeros(0)
             out["rel_macro_f1"] = _macro_f1(pred, lab, self.n_cls)
+            out["rel_gt_in_cand"] = float(self.cand_hit) / n_pred
         if float(self.tp + self.fp + self.fn):
             tp, fp, fn = float(self.tp), float(self.fp), float(self.fn)
             prec = tp / max(tp + fp, 1.0)

@@ -32,8 +32,11 @@ def _xywh2xyxy(b: torch.Tensor) -> torch.Tensor:
 class RelateEvaluator:
     """分层指标累计器（纯 torch，图粒度）。"""
 
-    def __init__(self, iou_thr: float = 0.5):
+    def __init__(self, iou_thr: float = 0.5, match_by_index: bool = False):
         self.iou_thr = iou_thr
+        # PredCls 下 pred_boxes 就是 GT 框，按索引直接配对即可。走 IoU 会因重叠框
+        # 把预测行配到另一对（实测压低 acc 约 2pp）。
+        self.match_by_index = match_by_index
         self.reset()
 
     def reset(self):
@@ -42,6 +45,8 @@ class RelateEvaluator:
         self.pred_total = 0
         self.pa_correct = 0   # v3 predicate_acc 分子
         self.pa_total = 0     # v3 predicate_acc 分母（两端框匹配的标注对）
+        self.pa_pair_correct = 0  # pair-level：同一有序对的多条谓词只算一次
+        self.pa_pair_total = 0
         self.det_pair_hits = 0  # v3 DetPairRecall
         self.det_pair_total = 0
         self.recall_hits = {k: 0 for k in (20, 50, 100)}
@@ -51,14 +56,23 @@ class RelateEvaluator:
         self.gt_ranks = []
         self.pair_recall_hits = 0
         self.pair_recall_total = 0
-        self._scores = ([], [])  # (pos_exist_scores, neg_exist_scores)
+        # 存在性 AP：正例按 GT 有序对去重取最高分，未被任何预测行匹配上的对
+        # 记入 exist_missed 留在分母里（原实现只除以"预测出的正例数"，AP 被放大
+        # 约 1/PairRecall 倍）。
+        self._exist_pos = []
+        self._exist_neg = []
+        self.exist_missed = 0
+        self.pair_topk_hits = {}   # k -> 命中数（该对 top-k 谓词命中任一 GT 谓词）
+        self.pair_topk_total = 0
 
-    def update(self, pred_boxes, pred_rels, gt_boxes, gt_rels, topk=100):
+    def update(self, pred_boxes, pred_rels, gt_boxes, gt_rels, topk=100, pred_topk=None):
         """v3 指标更新。pred_rels [P,5] = (s, o, pred_id, 融合分, 存在性分)。
 
+        ``pred_topk [P,k]``：每个预测行的 top-k 谓词 id，用于 pair-level top-k 补充指标。
         设备统一：入口全部拉到 CPU。
-        - predicate_acc：分母=候选中两端框 IoU≥0.5 的标注对；分子=其中最高谓词==标注
-        - pair_existence_AP：仅按存在性分（第5列）排序；正样本只看两端框匹配
+        - predicate_acc：分母=候选中两端框 IoU≥0.5 的标注行；分子=其中最高谓词==标注
+        - pair_acc：按唯一有序对去重，命中该对任一 GT 谓词即对
+        - pair_existence_AP：正例按有序对去重，未被匹配的 GT 对计入分母
         - DetPairRecall：GT 两端框是否都被检测出（60 框内）；PairRecall：有序对在候选中
         """
         self.n_imgs += 1
@@ -68,10 +82,18 @@ class RelateEvaluator:
         gt_rels = gt_rels.cpu() if torch.is_tensor(gt_rels) else gt_rels
         R = gt_rels.shape[0] if gt_rels is not None and gt_rels.numel() else 0
         self.gt_total += R
+        # 本图唯一有序对 -> 该对的全部 GT 谓词
+        pair_pids = {}
+        for r in range(R):
+            pair_pids.setdefault((int(gt_rels[r, 0]), int(gt_rels[r, 1])), set()).add(
+                int(gt_rels[r, 2]))
         if pred_rels is None or pred_rels.numel() == 0:
             self.gt_ranks.extend([float("inf")] * R)  # 未召回的 GT 不该给 MRR 贡献分
-            # 无预测时也要进 PairRecall 分母，否则"一条都没预测出来"的图会被整体剔除
+            # 无预测时也要进分母，否则"一条都没预测出来"的图会被整体剔除
             self.pair_recall_total += R
+            self.pa_pair_total += len(pair_pids)
+            self.pair_topk_total += len(pair_pids)
+            self.exist_missed += len(pair_pids)
             for r in range(R):
                 pid = int(gt_rels[r, 2])
                 self.mrecall_total[pid] = self.mrecall_total.get(pid, 0) + 1
@@ -85,9 +107,18 @@ class RelateEvaluator:
 
         ps, po = pred_sorted[:, 0].long(), pred_sorted[:, 1].long()
         pp = pred_sorted[:, 2].long()
-        # 同一张 IoU 矩阵下面三处复用（原来每处各算一遍）
-        iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes)) if R else None
+        if pred_topk is not None:
+            pred_topk = pred_topk[order]
+        exist_scores = pred_sorted[:, 4] if pred_sorted.shape[1] >= 5 else pred_sorted[:, 3]
+        # 同一张 IoU 矩阵下面到处复用。PredCls 下 pred 框就是 GT 框，用单位阵等价于
+        # 按索引配对，且不会被重叠框配到另一对。
+        if R and self.match_by_index and pred_boxes.shape[0] == gt_boxes.shape[0]:
+            # 行=GT 框、列=预测框；R 是关系行数，不能拿来当框数
+            iou = torch.eye(gt_boxes.shape[0], dtype=torch.float32)
+        else:
+            iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes)) if R else None
 
+        matched_any = torch.zeros(pred_sorted.shape[0], dtype=torch.bool)
         if R:
             # DetPairRecall：GT 两端框各自是否有任一检测框 IoU≥thr（不看配对）
             endp_ok = ((iou >= self.iou_thr).any(dim=1))  # [R_gt] 每个GT框
@@ -96,7 +127,7 @@ class RelateEvaluator:
                 self.det_pair_total += 1
                 self.det_pair_hits += int(bool(endp_ok[gs]) and bool(endp_ok[go]))
 
-            # PairRecall + predicate_acc（v3 分母）：两端框匹配的标注对
+            # PairRecall + predicate_acc（v3 分母）：两端框匹配的标注行
             for r in range(R):
                 gs, go, gp = int(gt_rels[r, 0]), int(gt_rels[r, 1]), int(gt_rels[r, 2])
                 end_match = (iou[gs, ps] >= self.iou_thr) & (iou[go, po] >= self.iou_thr)
@@ -108,6 +139,26 @@ class RelateEvaluator:
                     self.pa_total += 1
                     # 分子=该对最高分谓词==标注：取首个匹配行（融合分排序下的 argmax 记录）
                     self.pa_correct += int(int(pp[end_match.nonzero()[0, 0]]) == gp)
+
+            # 唯一有序对：pair_acc、pair-level top-k、存在性 AP 的正例都按对去重。
+            # 行级 predicate_acc 把「同一有序对的第 2+ 谓词」永远算错（val 19.0% 的行）。
+            for (gs, go), pids in pair_pids.items():
+                m = (iou[gs, ps] >= self.iou_thr) & (iou[go, po] >= self.iou_thr)
+                hit = m.nonzero().flatten()
+                self.pa_pair_total += 1
+                self.pair_topk_total += 1
+                if not hit.numel():
+                    self.exist_missed += 1
+                    continue
+                top = int(hit[0])
+                self.pa_pair_correct += int(int(pp[top]) in pids)
+                self._exist_pos.append(float(exist_scores[top]))
+                matched_any |= m
+                if pred_topk is not None:
+                    ids = pred_topk[top].tolist()
+                    for k in range(1, len(ids) + 1):
+                        if set(ids[:k]) & pids:
+                            self.pair_topk_hits[k] = self.pair_topk_hits.get(k, 0) + 1
 
         # 三元组 R@K / mR@K（graph-constrained，融合分排序）
         for r in range(R):
@@ -122,18 +173,8 @@ class RelateEvaluator:
                     self.recall_hits[k] += 1
                     self.mrecall_hits.setdefault(pid, {})[k] = self.mrecall_hits.get(pid, {}).get(k, 0) + 1
 
-        # 存在性 AP：仅按存在性分（第5列）排序；正样本只看两端框匹配（不看谓词）
-        pos_s, neg_s = self._scores
-        exist_scores = pred_sorted[:, 4] if pred_sorted.shape[1] >= 5 else pred_sorted[:, 3]
-        if R:
-            matched_gt = torch.zeros(pred_sorted.shape[0], dtype=torch.bool)
-            for r in range(R):
-                gs, go = int(gt_rels[r, 0]), int(gt_rels[r, 1])
-                matched_gt |= (iou[gs, ps] >= self.iou_thr) & (iou[go, po] >= self.iou_thr)
-            pos_s.extend(exist_scores[matched_gt].tolist())
-            neg_s.extend(exist_scores[~matched_gt].tolist())
-        else:
-            neg_s.extend(exist_scores.tolist())
+        # 存在性 AP 的负例：没被任何 GT 有序对匹配上的预测行（正例已按对去重）
+        self._exist_neg.extend(exist_scores[~matched_any].tolist())
 
     def _det_pair_recall(self, gt_boxes, gt_rels, pred_boxes, R, only_det=False):
         """候选空时的 DetPairRecall 兜底统计。"""
@@ -145,9 +186,13 @@ class RelateEvaluator:
             self.det_pair_hits += int(bool(endp_ok[gs]) and bool(endp_ok[go]))
 
     @staticmethod
-    def _ap(pos: List[float], neg: List[float]) -> float:
-        """rank-based AP：正样本在合并排序中的平均精度（PR 曲线下面积近似）。"""
-        if not pos:
+    def _ap(pos: List[float], neg: List[float], missed: int = 0) -> float:
+        """rank-based AP：正样本在合并排序中的平均精度（PR 曲线下面积近似）。
+
+        ``missed`` 是没被任何预测行匹配上的 GT 正例数。它们不进排序，但必须留在
+        分母里——原实现除以"预测出的正例数"，漏检越多 AP 越高（约放大 1/PairRecall）。
+        """
+        if not pos and not missed:
             return 0.0
         import numpy as np
 
@@ -157,26 +202,38 @@ class RelateEvaluator:
         labels = labels[order]
         tp = np.cumsum(labels)
         precision = tp / (np.arange(len(labels)) + 1)
-        return float((precision * labels).sum() / max(1, labels.sum()))
+        return float((precision * labels).sum() / max(1, len(pos) + missed))
 
     def stats(self) -> Dict:
         out = {"n_imgs": self.n_imgs, "n_gt": self.gt_total}
         if self.gt_total:
             for k, v in self.recall_hits.items():
                 out[f"R@{k}"] = v / self.gt_total
-            # mR@K
+            # mR@K（含按 support 分桶：1 / 2-4 / 5-19 / 20+，桶内宏平均）
             for k in (50, 100):
-                per_class = []
+                buckets = {"le1": [], "2_4": [], "5_19": [], "ge20": []}
                 for pid, total in self.mrecall_total.items():
                     h = self.mrecall_hits.get(pid, {}).get(k, 0)
-                    per_class.append(h / total)
+                    r = h / total
+                    b = ("le1" if total <= 1 else "2_4" if total <= 4
+                         else "5_19" if total <= 19 else "ge20")
+                    buckets[b].append(r)
+                per_class = [r for vals in buckets.values() for r in vals]
                 out[f"mR@{k}"] = sum(per_class) / len(per_class) if per_class else 0.0
+                for b, vals in buckets.items():
+                    out[f"mR@{k}_sup_{b}"] = sum(vals) / len(vals) if vals else 0.0
             r50 = out.get("R@50", 0.0)
             mr50 = out.get("mR@50", 0.0)
             out["F1@50"] = 2 * r50 * mr50 / max(1e-9, r50 + mr50)
-            out["pair_existence_AP"] = self._ap(*self._scores)  # 仅存在性分排序
+            out["pair_existence_AP"] = self._ap(self._exist_pos, self._exist_neg, self.exist_missed)
             out["predicate_acc"] = self.pa_correct / max(1, self.pa_total)  # v3 分母
             out["pa_denominator"] = self.pa_total
+            out["pair_acc"] = self.pa_pair_correct / max(1, self.pa_pair_total)
+            out["pair_acc_denominator"] = self.pa_pair_total
+            # 每对 top-k 谓词的命中率：标准 graph-constrained R@K 只取 argmax，
+            # 这一组是 ngR@K 口径的补充指标，不能和 R@50 混比。
+            for k, v in sorted(self.pair_topk_hits.items()):
+                out[f"pair_acc@{k}"] = v / max(1, self.pair_topk_total)
             out["DetPairRecall"] = self.det_pair_hits / self.det_pair_total if self.det_pair_total else 0.0
             out["PairRecall"] = (
                 self.pair_recall_hits / self.pair_recall_total if self.pair_recall_total else 0.0
@@ -195,6 +252,8 @@ else:
 
 
 class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
+    # score() 顺带返回每对 top-k 谓词，用于 pair_acc@k（ngR 口径）补充指标。
+    _PAIR_TOPK = 5
     """覆写 BaseValidator 虚方法：只算关系指标，不算检测 mAP。"""
 
     relate_info: Optional[dict] = None
@@ -231,7 +290,10 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
         # init_metrics used to overwrite it with args (which has no protocol).
         self.protocol = getattr(self, "protocol", None) or \
             getattr(self.args, "protocol", "sgdet") or "sgdet"
-        self.evaluator = RelateEvaluator()
+        self.evaluator = RelateEvaluator(match_by_index=self.protocol == "sgcls")
+        # PredCls：SGDet 之外并行记一份。pred 框恒为 GT 框，按索引配对。
+        self.evaluator_pc = RelateEvaluator(match_by_index=True)
+        self._rel_head = None
         self.rel_stats = {}
         LOGGER.info(f"[RelateVal] protocol={self.protocol}, V={len(info['rnames'])}")
 
@@ -280,10 +342,13 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
                 continue
             b = r["bboxes"]  # xyxy（letterbox 输入坐标系）
             conf = r.get("conf")
+            cls = r.get("cls")  # 检测类别；postprocess 不一定提供，缺省则不打类别
             # 按检测置信度留 60 框再打分（max_objects 契约）
             if conf is not None and b.shape[0] > rel.max_objects:
                 keep = conf.squeeze(-1).topk(rel.max_objects).indices
                 b = b[keep]
+                if cls is not None:
+                    cls = cls[keep]
             if b.numel() == 0:
                 r["rel"] = torch.zeros((0, 5))
                 continue
@@ -291,7 +356,9 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
             cx = (b[:, 0] + b[:, 2]) / 2
             cy = (b[:, 1] + b[:, 3]) / 2
             boxes = torch.stack([cx / iw, cy / ih, wh[:, 0] / iw, wh[:, 1] / ih], dim=1)
-            rel_out = rel.score(boxes.cpu(), img_idx=bi) if boxes.shape[0] >= 2 else torch.zeros((0, 5))
+            rel_out = (rel.score(boxes.cpu(), img_idx=bi,
+                                 cls=cls.cpu().reshape(-1) if cls is not None else None)
+                       if boxes.shape[0] >= 2 else torch.zeros((0, 5)))
             r["rel"] = rel_out
         return results
 
@@ -308,6 +375,14 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
             # 本图 GT
             # 框：从 batch labels 切本图（归一化 xywh）
             labels = batch["bboxes"][idx == i] if "bboxes" in batch else _t.zeros((0, 4))
+            # GT 类别与 labels 对齐；训练期 batch["cls"] 被重映射成局部文本 id，
+            # preprocess_batch 存的 cls_global 才是物体类 id。
+            cls_all = batch.get("cls_global", batch.get("cls"))
+            cls_i = None
+            if cls_all is not None and cls_all.numel() == idx.numel():
+                cls_i = cls_all[idx == i].reshape(-1).long().cpu()
+                if cls_i.numel() != labels.shape[0]:
+                    cls_i = None
             rels_i = relations[i] if i < len(relations) else _t.zeros((0, 3))
             if rels_i is not None and len(rels_i):
                 rels_i = rels_i.to(labels.device).float()
@@ -328,25 +403,44 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
             else:
                 # 没有检测框 ≠ "预测框就是 GT 框"。用 GT 会让 DetPairRecall 恒 1.0。
                 pred_boxes = _t.zeros((0, 4))
-            # SGCls protocol: oracle GT boxes, re-score with captured features.
-            # The old code accepted `protocol` but never branched, silently
-            # reporting SGDet numbers under the SGCls label.
-            if getattr(self, "protocol", "sgdet") == "sgcls" and labels.shape[0] >= 2:
+            # PredCls（文献口径；本实现只喂框、不预测物体类别，SGCls 与 PredCls 同义）：
+            # 用 GT 框重新打分。protocol=sgcls 时它替代 SGDet 主指标；否则在同一次
+            # 前向里额外记一份 pc_*——SGDet 被冻结检测器压死时，这是唯一能判断关系头
+            # 本身好坏的口径。
+            rel = self._rel_head  # 逐图重扫 model.modules() 太慢，init_metrics 里缓存一次
+            if rel is None and labels.shape[0] >= 2:
                 model = getattr(self, "relate_model_ref", None) or getattr(self, "model", None)
                 model = model.module if hasattr(model, "module") else model
-                rel = next((m for m in model.modules()
-                            if m.__class__.__name__ == "YOLOVORelate"), None)
-                if rel is not None:
-                    pred_rels = rel.score(labels.cpu(), img_idx=i)
-                    pred_boxes = labels.cpu()
-            self.evaluator.update(pred_boxes, pred_rels, labels, rels_i)
+                if model is not None:
+                    rel = next((m for m in model.modules()
+                                if m.__class__.__name__ == "YOLOVORelate"), None)
+                self._rel_head = rel
+            sgcls = getattr(self, "protocol", "sgdet") == "sgcls"
+            res = top_k = None
+            if rel is not None and labels.shape[0] >= 2:
+                res, top_k = rel.score(labels.cpu(), img_idx=i, cls=cls_i,
+                                       pred_topk=self._PAIR_TOPK)
+            if sgcls:
+                if res is not None:
+                    pred_rels, pred_boxes = res, labels.cpu()
+                self.evaluator.update(pred_boxes, pred_rels, labels, rels_i, pred_topk=top_k)
+            else:
+                # 照常更新 pc_ 分母：<2 框的图没有 pair 可打分，但 GT 行仍要计入
+                pc_rels = res if res is not None else _t.zeros((0, 5))
+                self.evaluator_pc.update(labels.cpu(), pc_rels, labels, rels_i, pred_topk=top_k)
+                self.evaluator.update(pred_boxes, pred_rels, labels, rels_i)
 
     def get_stats(self):
         self.rel_stats = self.evaluator.stats()
         d = dict(self.rel_stats)
-        # checkpoint 选择指标：F1@50（R@50 与 mR@50 调和平均，惩罚偏科轮次）。
-        # 不提供 fitness 时父类回退到最后 batch 负损失——空标注图损失≈0 会胜出。
-        d["fitness"] = float(d.get("F1@50", 0.0))
+        if getattr(self, "evaluator_pc", None) is not None and self.evaluator_pc.n_imgs:
+            for k, v in self.evaluator_pc.stats().items():
+                d[f"pc_{k}"] = v
+        # checkpoint 选择指标：优先 PredCls 的 R@50。SGDet 的 R@50 在冻结检测器下恒≈0，
+        # 用它选等于在噪声里挑冠军；F1@50 里的 mR@50 分母有 62% 是 ≤2 样本的类，同样
+        # 由噪声主导。不提供 fitness 时父类回退到最后 batch 负损失——空标注图损失≈0 会胜出。
+        d["fitness"] = float(d["pc_R@50"] if "pc_R@50" in d else d.get("R@50", 0.0))
+        self.rel_stats = d  # print_results 打的是这份，pc_* 才看得到
         return d
 
     def finalize_metrics(self):

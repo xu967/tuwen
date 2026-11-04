@@ -59,7 +59,9 @@ class _VocabHead(nn.Module):
         self.logit_scale = nn.Parameter(torch.tensor(math.log(logit_scale_init)))
         self.logit_bias = nn.Parameter(torch.zeros(()))
         self.register_buffer("W", torch.empty(0))
-        self.register_buffer("alpha", torch.empty(0))
+        # 可学习参数而不是 buffer：原来只在 set_vocabulary 里算一次，gate_mlp 永远
+        # 没有梯度，路由退化成全体谓词固定 ~0.49。
+        self.register_parameter("alpha", None)
         self.pred_names: List[str] = []
         self.gate_mlp = nn.Sequential(
             nn.Linear(text_dim, gate_hidden), nn.GELU(), nn.Linear(gate_hidden, 1))
@@ -77,7 +79,9 @@ class _VocabHead(nn.Module):
     @torch.no_grad()
     def _update_alpha(self) -> None:
         if self.W.numel():
-            self.alpha = torch.sigmoid(self.gate_mlp(self.W).squeeze(-1)).clone()
+            a = torch.sigmoid(self.gate_mlp(self.W).squeeze(-1)).clone()
+            # gate_mlp 只提供初值；之后 alpha 由 NCE/场损失自己学。
+            self.alpha = nn.Parameter(a)
 
     def score_query_dual(self, q_sem: torch.Tensor, q_spa: torch.Tensor) -> torch.Tensor:
         """Per-predicate mixture of the two experts' cosines, scaled and shifted."""
@@ -176,7 +180,12 @@ class _Sampler(nn.Module):
 
 
 def _gt_grid(gt_list, B: int, N: int, device) -> Tuple[torch.Tensor, torch.Tensor]:
-    """is_gt [B,N*N] and predicate label per pair (-1 none), from per-image gt lists."""
+    """is_gt [B,N*N] and predicate label per pair (-1 none), from per-image gt lists.
+
+    同一有序对的多个谓词在这里 last-wins，只保留最后一个。这个单标签仅用于
+    「把 GT 列强制塞进 top-M 候选」和诊断；训练目标走 _losses 里按 gt_list
+    重建的多热 gt_hot，不受此限制。
+    """
     is_gt = torch.zeros(B, N * N, dtype=torch.bool, device=device)
     labels = torch.full((B, N * N), -1, dtype=torch.long, device=device)
     for b, gt in enumerate(gt_list):
@@ -233,6 +242,10 @@ class YOLOVORelate(nn.Module):
         # GLP predicate field (off by default; V1/V2 selected by FieldConfig)
         self.field_cfg = FieldConfig.from_any(field_cfg) if field_cfg is not None \
             else FieldConfig(mode="off")
+        # 场残差范数上限：早期健康值在 8~25，超过 16 后开始发散（见 _forward_pairs）。
+        self.field_delta_max = 16.0
+        # 候选列与 raw 检索分数的合成方式：field（覆写，原行为）| max（只加分）| raw（不用场）
+        self.field_fuse = "field"
         self.field_read: Optional[PredicateFieldRead] = None
         self.q_res_proj: Optional[nn.Module] = None
         if self.field_cfg.mode != "off":
@@ -251,6 +264,9 @@ class YOLOVORelate(nn.Module):
         self.obj_text_proj = nn.Linear(backbone_dim, text_dim, bias=False)
         nn.init.xavier_uniform_(self.sub_text_proj.weight)
         nn.init.xavier_uniform_(self.obj_text_proj.weight)
+        # PredCls 的定义输入是 GT 框 + GT 类别；冻结的类名嵌入经此投到视觉特征空间。
+        self.cls_proj = nn.Linear(text_dim, backbone_dim, bias=False)
+        nn.init.xavier_uniform_(self.cls_proj.weight)
         self.compose_norm = nn.LayerNorm(text_dim)
         self.compose_gate = nn.Parameter(torch.tensor([0.1, 0.1]))
         self.register_buffer("W_obj", torch.empty(0))   # class-name embeddings (Q2)
@@ -336,7 +352,8 @@ class YOLOVORelate(nn.Module):
                        box_counts: Optional[torch.Tensor] = None,
                        gt_list: Optional[List[List[Tuple[int, int, int]]]] = None,
                        eval_budget: Optional[int] = None,
-                       field_ablate: Optional[str] = None):
+                       field_ablate: Optional[str] = None,
+                       box_cls: Optional[torch.Tensor] = None):
         """Batched pair pipeline (no losses). ``box_counts [B]`` marks the valid
         prefix of each padded box row, so batches of variable-size images share
         one forward instead of B per-image calls."""
@@ -346,6 +363,13 @@ class YOLOVORelate(nn.Module):
         device = boxes_b.device
 
         v_obj = self.spatial_pool(F_map, boxes_b)             # [B,N,768]
+        if box_cls is not None and self.W_obj.numel():
+            # 类别是 PredCls 的定义输入；不喂的话模型只能从外观反推，实测低于
+            # 只用 (subj_cls,obj_cls) 查表的 32.3%。W_obj 冻结，cls_proj 可学。
+            if self.W_obj.device != device:
+                self.W_obj = self.W_obj.to(device)
+            cid = box_cls.to(device).long().clamp(0, self.W_obj.shape[0] - 1)
+            v_obj = v_obj + self.cls_proj(self.W_obj[cid])
         is_gt = labels = None
         training = gt_list is not None
         if training:
@@ -376,6 +400,22 @@ class YOLOVORelate(nn.Module):
                 self.sampler.final_budget = saved_final
 
         K = sub_idx.shape[1]
+        # _gt_grid 的 labels 是 last-wins：同一有序对的第 2..k 个谓词会被覆盖。候选强制
+        # 和场指标都需要「这个有序对的全部 GT 谓词」，这里建一次 (slot, pred) 稀疏索引，
+        # 两处共用，避免再各自反查一遍。
+        gt_slots = None
+        if training and gt_list is not None:
+            gt_slots = []
+            empty = torch.empty(0, dtype=torch.long, device=device)
+            for b in range(B):
+                if not gt_list[b]:
+                    gt_slots.append((empty, empty))
+                    continue
+                g = torch.tensor(gt_list[b], dtype=torch.long, device=device)     # [G,3]
+                flat = sub_idx[b] * N + obj_idx[b]                                # [K]
+                hit = flat.unsqueeze(1) == (g[:, 0] * N + g[:, 1]).unsqueeze(0)   # [K,G]
+                k_idx, g_idx = hit.nonzero(as_tuple=True)
+                gt_slots.append((k_idx, g[g_idx, 2]))
         B_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, K)
         sub_boxes_k = boxes_b[B_idx, sub_idx]
         obj_boxes_k = boxes_b[B_idx, obj_idx]
@@ -432,6 +472,7 @@ class YOLOVORelate(nn.Module):
                "rel_logits": rel_logits, "logits": logits, "v_obj": v_obj,
                "boxes": boxes_b, "n_boxes": N, "q": q, "q_spa": q_spa,
                "geo19": geo19, "is_gt": is_gt, "labels": labels, "force": force,
+               "gt_slots": gt_slots,
                "box_counts": box_counts, "geo_scores": geo_scores, "zs": zs, "zo": zo}
         if self.field_read is not None:
             if self.vocab_head.W.device != logits.device:
@@ -439,7 +480,8 @@ class YOLOVORelate(nn.Module):
                 self.vocab_head.alpha = self.vocab_head.alpha.to(logits.device)
             V = self.vocab_head.W.shape[0]
             m = min(int(self.field_cfg.n_candidates), V)
-            cand = self._select_candidates(logits, pred_labels, valid_mask, m, training)
+            cand = self._select_candidates(logits, pred_labels, valid_mask, m, training,
+                                           gt_slots=gt_slots)
             e_cand = self.vocab_head.W[cand]
             if field_ablate == "agnostic":
                 e_cand = e_cand.mean(dim=2, keepdim=True).expand_as(e_cand)
@@ -448,14 +490,36 @@ class YOLOVORelate(nn.Module):
             r_field, field_out = self.field_read(
                 r, scene_d, anchors, geo19, e_cand, return_field=True)
             delta = r_field - r.unsqueeze(2)
-            q_f = q.unsqueeze(2) + self.q_res_proj(delta)
-            q_spa_f = q_spa.unsqueeze(2) + self.q_res_proj(delta)
+            # 残差无界会让 q_f 的归一化梯度失控：实测 delta_norm 从 24 涨到 50 后，
+            # 下一轮 loss 直接变 NaN。按范数做投影截断（超出的部分等比缩回），不新增参数。
+            dnorm = delta.norm(dim=-1, keepdim=True)
+            delta = delta * (self.field_delta_max / dnorm.clamp_min(self.field_delta_max))
+            res = self.q_res_proj(delta)
+            # delta 截断只防 fp16 溢出，防不住退化：q_res_proj 的输出仍可达 ||q|| 的
+            # 228 倍，且候选维度变化为 0，散列后把 raw 检索分数整个盖成常量噪声。
+            # 把输出投影到 ||q||/10 的球内，场头只能「轻推」排序，检索头重新主导。
+            cap = (q.detach().norm(dim=-1) / 10.0).clamp_min(1.0)[..., None, None]
+            res = res * (cap / res.norm(dim=-1, keepdim=True).clamp_min(cap))
+            q_f = q.unsqueeze(2) + res
+            q_spa_f = q_spa.unsqueeze(2) + res
             cos_m, logit_m = self.vocab_head.score_candidates(q_f, q_spa_f, cand)
-            out["logits"] = logits.scatter(-1, cand, logit_m.to(logits.dtype))
+            # 保留未散列的检索分数：scatter 会把 GT 列覆盖成 field 分数，检索头
+            # （q·W）若只在散列后的分数上训练，正样本列永远拿不到梯度，推理时
+            # raw top-M 就召回不到 GT（实测 GT 排名 332~9112，top-4 命中 0/17）。
+            out["logits_raw"] = logits
+            fused = logits.scatter(-1, cand, logit_m.to(logits.dtype))
+            # 场分数整体低于 raw 时，覆写等于把检索头的赢家压下去（实测 acc −2.9pp）。
+            # max：只允许场加分；raw：评测不用场（消融）。getattr：旧 ckpt 没这个属性。
+            mode = getattr(self, "field_fuse", "field")
+            if mode == "max":
+                fused = torch.maximum(logits, fused)
+            elif mode == "raw":
+                fused = logits
+            out["logits"] = fused
             out["cand_idx"] = cand
             out["field_cos"] = cos_m
             out["field"] = field_out
-            diag = {"delta_norm": delta.detach().norm(dim=-1).flatten(1).mean(-1)}
+            diag = {"delta_norm": dnorm.detach().flatten(1).mean(-1)}
             gamma = getattr(self.field_read, "gamma", None)
             if gamma is not None:
                 diag["gamma_l1"] = gamma.detach().abs().sum().expand(B)
@@ -474,13 +538,17 @@ class YOLOVORelate(nn.Module):
         boxes_b [1, N, 4] normalised cxcywh; gt_list per-image triples.
         Returns dict with indices, logits, and (train) the seven loss terms.
         """
-        o = self._forward_pairs(base, boxes_b, None, gt_list, eval_budget, field_ablate)
+        o = self._forward_pairs(base, boxes_b, None, gt_list, eval_budget, field_ablate, box_cls)
         B = o["sub_idx"].shape[0]
         out = {"sub_idx": o["sub_idx"][0], "obj_idx": o["obj_idx"][0],
                "valid_mask": o["valid_mask"][0], "rel_logits": o["rel_logits"][0],
                "logits": o["logits"][0], "v_obj": o["v_obj"], "boxes": boxes_b,
                "n_boxes": o["n_boxes"], "geo_scores": o["geo_scores"],
                "zs": o["zs"], "zo": o["zo"]}
+        # _losses 用 out.get("logits_raw", out["logits"]) 兜底；不往外传会静默 fallback
+        # 到场散列后的 logits，NCE 凭空低 0.6 nat，而检索排序毫无改善。
+        if "logits_raw" in o:
+            out["logits_raw"] = o["logits_raw"][0]
         if "field" in o:
             out["cand_idx"] = o["cand_idx"][0]
             out["field_cos"] = o["field_cos"][0]
@@ -494,8 +562,7 @@ class YOLOVORelate(nn.Module):
             }
         if gt_list is None:
             return out
-        out.update(self._losses(out, gt_list, o["q"], o["q_spa"], o["geo19"],
-                                o["is_gt"], o["labels"], o["force"],
+        out.update(self._losses(out, gt_list, o["q"], o["is_gt"],
                                 o["sub_idx"], o["obj_idx"], o["valid_mask"],
                                 o["v_obj"], boxes_b, o["n_boxes"], box_cls,
                                 box_counts=o["box_counts"]))
@@ -503,9 +570,8 @@ class YOLOVORelate(nn.Module):
 
     # ------------------------------------------------------------- losses
 
-    def _losses(self, out, gt_list, q, q_spa, geo19, is_gt, labels, force,
-                sub_idx, obj_idx, valid_mask, v_obj, boxes_b, N, box_cls=None,
-                box_counts=None):
+    def _losses(self, out, gt_list, q, is_gt, sub_idx, obj_idx, valid_mask,
+                v_obj, boxes_b, N, box_cls=None, box_counts=None):
         """Seven RA loss terms for one image (sum form; trainer averages per set)."""
         from .ra.ontology import build_ontology  # noqa: F401  (tables already on self.onto)
         device = q.device
@@ -521,14 +587,18 @@ class YOLOVORelate(nn.Module):
         V = self.vocab_head.W.shape[0]
         zeros = q.new_zeros
 
-        # gt hot per slot [K, V]（向量化 scatter；K 最多 128，逐槽 Python 循环是热点）
+        # gt hot per slot [K, V]：按 gt_list 全量多热。不能走 labels 网格——那是
+        # last-wins 的单标签，同一有序对的第 2..k 个谓词会被覆盖（训练集 23.04%
+        # 的关系行），sigmoid/nce 因此只能学到其中一个。
         K = sub_idx.shape[1]
         gt_hot = torch.zeros(K, V, dtype=torch.bool, device=device)
-        ks = valid_mask[0].nonzero(as_tuple=True)[0]
-        if ks.numel():
-            labs = labels[0, sub_idx[0, ks] * N + obj_idx[0, ks]]
-            ok = labs >= 0
-            gt_hot[ks[ok], labs[ok]] = True
+        if gt_list[0]:
+            g = torch.tensor(gt_list[0], dtype=torch.long, device=device)   # [G,3]
+            flat = sub_idx[0] * N + obj_idx[0]                              # [K]
+            hit = (flat.unsqueeze(1) == (g[:, 0] * N + g[:, 1]).unsqueeze(0)) \
+                & valid_mask[0].unsqueeze(1)
+            slot_i, gt_i = hit.nonzero(as_tuple=True)
+            gt_hot[slot_i, g[gt_i, 2]] = True
         has_gt = gt_hot.any(-1) & valid_mask[0]
         hot = gt_hot[has_gt].float()
 
@@ -541,7 +611,8 @@ class YOLOVORelate(nn.Module):
         # （NCE 只作用于 cos）；detach 反而留下 Σ f_c·cos_c 的非零梯度，持续把
         # logit_scale 往下压。
         scale = self.vocab_head.logit_scale.exp().clamp(max=100.0)
-        cos_all = (out["logits"] - self.vocab_head.logit_bias) / scale
+        # NCE/swap 走未散列的检索分数（检索头），sigmoid/bg 走散列后的分数（场头）。
+        cos_all = (out.get("logits_raw", out["logits"]) - self.vocab_head.logit_bias) / scale
 
         # 1. InfoNCE (batch-local: within-image columns; hard negatives by neg_lw)
         if has_gt.any():
@@ -557,8 +628,11 @@ class YOLOVORelate(nn.Module):
             pos_any.index_add_(0, a_idx, pos_mask[g_idx].to(hot.dtype))
             inv_any = torch.zeros_like(hot)
             inv_any.index_add_(0, a_idx, inv_mask[g_idx].to(hot.dtype))
+            # neg_lw 是乘性权重 ∈[0.25,1]（ontology.py）；作为 log 偏置必须取 log
+            # （≤0），直接相加等于把远负例抬高 +0.25~+1.0、近义列反而零偏置。
+            # 同一槽位多个 GT 时 log 相加 = 权重连乘，与「都要区分」一致。
             lw = torch.zeros_like(hot)
-            lw.index_add_(0, a_idx, neg_lw[g_idx])
+            lw.index_add_(0, a_idx, neg_lw[g_idx].clamp_min(1e-8).log())
             lw = lw.masked_fill((pos_any > 0) | (inv_any > 0), 0.0)
             den = torch.logsumexp(logits_n + lw, dim=-1)
             per = den[a_idx] - logits_n[a_idx, g_idx]
@@ -584,6 +658,7 @@ class YOLOVORelate(nn.Module):
 
             # 3. per-cell sigmoid aux (RA lambda_sigmoid=0.25 weighting)
             # RA relsgg.py: 直接 bce_with_logits(lg, tgt, weight=w)，无 sigmoid/logit 往返。
+            # 这一项用散列后的分数（含 field），是场头唯一的正样本上行监督。
             lg = out["logits"][has_gt]
             tgt = hot
             pos_mass = tgt.sum(-1, keepdim=True)
@@ -664,8 +739,10 @@ class YOLOVORelate(nn.Module):
     # ------------------------------------------------------- field helpers
 
     def _select_candidates(self, logits: torch.Tensor, gtp: Optional[torch.Tensor],
-                           valid: torch.Tensor, m: int, training: bool) -> torch.Tensor:
-        """Top-M predicate columns per pair; GT column forced in during training."""
+                           valid: torch.Tensor, m: int, training: bool,
+                           gt_slots: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None
+                           ) -> torch.Tensor:
+        """Top-M predicate columns per pair; every GT predicate forced in during training."""
         B, K, V = logits.shape
         scores = logits.clone()
         if training and gtp is not None:
@@ -673,6 +750,11 @@ class YOLOVORelate(nn.Module):
             idx = gtp.clamp(min=0).unsqueeze(-1)
             forced = scores.scatter(2, idx, torch.full_like(idx, float("inf"), dtype=scores.dtype))
             scores = torch.where(ok, forced, scores)
+        # gtp 是 last-wins 的单标签，多谓词对被覆盖掉的那些在这里补回来。
+        if training and gt_slots is not None:
+            for b, (si, pi) in enumerate(gt_slots):
+                if si.numel():
+                    scores[b, si, pi] = float("inf")
         scores = scores.masked_fill(~valid.unsqueeze(-1), float("-inf"))
         return scores.topk(min(m, V), dim=-1).indices
 
@@ -682,10 +764,15 @@ class YOLOVORelate(nn.Module):
         pass
 
     @torch.no_grad()
-    def score(self, boxes: torch.Tensor, topk: Optional[int] = None, img_idx: int = 0) -> torch.Tensor:
+    def score(self, boxes: torch.Tensor, topk: Optional[int] = None, img_idx: int = 0,
+              cls: Optional[torch.Tensor] = None,
+              pred_topk: Optional[int] = None):
         """Eval scoring on captured features. boxes [N,4] cxcywh normalised.
 
         img_idx：批 capture 时本图在批内的序号（validator 逐图调用按序传）。
+        cls：与 boxes 对齐的物体类别 id；PredCls/ SGCls 必须传（GT 类别是定义输入）。
+        pred_topk：额外返回每个 pair 的 top-k 谓词 id [P,k]（ngR 口径指标用）；
+        返回值随之变成 ``(rows, top_ids)``。
         Returns [P,5]: sub, obj, pred_id, fused, exist."""
         cap = self._captured
         if cap is None:
@@ -696,9 +783,12 @@ class YOLOVORelate(nn.Module):
         base = feats_list[img_idx if img_idx < len(feats_list) else 0].float()
         boxes = boxes.to(base.device).detach().float()
         if boxes.shape[0] < 2:
-            return boxes.new_zeros((0, 5))
+            rows = boxes.new_zeros((0, 5))
+            return (rows, boxes.new_zeros((0, pred_topk), dtype=torch.long)) \
+                if pred_topk is not None else rows
         out = self._compute(base, boxes.unsqueeze(0), gt_list=None,
-                            eval_budget=topk or self.eval_budget)
+                            eval_budget=topk or self.eval_budget,
+                            box_cls=cls.unsqueeze(0) if cls is not None else None)
         pred_logit = out["logits"]                     # [K, V] scaled cosine
         pair_logit = out["rel_logits"]                 # [K]   inner/16
         fused = torch.sigmoid(pred_logit + pair_logit.unsqueeze(-1))  # a=1,b=0 until Platt
@@ -706,13 +796,17 @@ class YOLOVORelate(nn.Module):
         best_f = fused.gather(-1, best.unsqueeze(-1)).squeeze(-1)
         exist = torch.sigmoid(pair_logit)
         keep = out["valid_mask"]
-        return torch.stack([out["sub_idx"][keep].float(), out["obj_idx"][keep].float(),
+        rows = torch.stack([out["sub_idx"][keep].float(), out["obj_idx"][keep].float(),
                             best[keep].float(), best_f[keep], exist[keep]], dim=1)
+        if pred_topk is None:
+            return rows
+        ids = fused.topk(min(int(pred_topk), fused.shape[-1]), dim=-1).indices[keep]
+        return rows, ids
 
     @torch.no_grad()
     def score_all(self, boxes: torch.Tensor, topk: Optional[int] = None,
                   img_idx: int = 0, field_ablate: Optional[str] = None,
-                  return_field: bool = False):
+                  return_field: bool = False, cls: Optional[torch.Tensor] = None):
         """Full eval output on captured features.
 
         Returns ``(sub, obj, valid, logits, rel_logits)``; with
@@ -736,6 +830,7 @@ class YOLOVORelate(nn.Module):
             return ret + ((None, None) if return_field else ())
         out = self._compute(base, boxes.unsqueeze(0), gt_list=None,
                             eval_budget=topk or self.eval_budget,
+                            box_cls=cls.unsqueeze(0) if cls is not None else None,
                             field_ablate=field_ablate)
         ret = (out["sub_idx"], out["obj_idx"], out["valid_mask"],
                out["logits"], out["rel_logits"])

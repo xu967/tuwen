@@ -29,7 +29,10 @@ class FieldConfig:
     """Configuration shared by train/eval/checkpoint restore."""
 
     mode: str = "glp"           # off | glp | inject | mlp
-    n_candidates: int = 4       # top-M predicate candidates per pair
+    # top-M predicate candidates per pair。原来是 4：检索头修好之前 GT 永远在 top-4 之外，
+    # 场头没机会重排；修好后测到 top-5 召回只有 0.43，M=4 会把上限卡死在四成。
+    # 16 在 batch=32 下 backward 会 OOM（实测要 19.25+4 GiB），8 是这张 22 GiB 卡上的上限。
+    n_candidates: int = 8
     n_kernels: int = 8          # kernels per anchor (V1 A*G = 32)
     hidden: int = 64
     sigma_min: float = 0.02

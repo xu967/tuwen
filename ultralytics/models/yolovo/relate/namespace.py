@@ -111,15 +111,27 @@ class RelateNamespace:
 
     # -------------------------------------------------------------------- val
 
-    def val(self, data=None, protocol: str = "sgdet", **kwargs):
-        """关系验证：SGDet（NMS 框，默认）或 SGCls（GT 框 oracle）双协议。"""
+    def val(self, data=None, protocol: str = "sgdet", field_fuse: Optional[str] = None, **kwargs):
+        """关系验证：SGDet（NMS 框，默认）或 PredCls（GT 框 oracle，别名 sgcls）。
+
+        本实现只吃框、不预测物体类别，所以文献里的 SGCls 与 PredCls 在这里同义。
+        field_fuse="max" 只允许场加分、"raw" 完全不用场（消融），缺省沿用模型内的设置。
+        """
         info = self._require_relate_ckpt("val")
         self._parent._check_is_pytorch_model()
+        if field_fuse is not None:
+            if field_fuse not in ("field", "max", "raw"):
+                raise ValueError(f"field_fuse 只接受 'field' | 'max' | 'raw'，收到 {field_fuse!r}。")
+            for m in self._parent.model.modules():
+                if m.__class__.__name__ == "YOLOVORelate":
+                    m.field_fuse = field_fuse
 
         from ultralytics.utils import DEFAULT_CFG_DICT
 
+        if protocol == "predcls":
+            protocol = "sgcls"
         if protocol not in ("sgdet", "sgcls"):
-            raise ValueError(f"protocol 只接受 'sgdet' | 'sgcls'，收到 {protocol!r}。")
+            raise ValueError(f"protocol 只接受 'sgdet' | 'sgcls' | 'predcls'，收到 {protocol!r}。")
 
         overrides = {k: v for k, v in {**self._parent.overrides, **kwargs}.items() if k != "protocol"}
         # Explicit data must override the checkpoint's train args (setdefault
@@ -137,7 +149,9 @@ class RelateNamespace:
 
         data_cfg = check_det_dataset(overrides["data"])
         vargs = SimpleNamespace(
-            imgsz=overrides.get("imgsz", 640), rect=True, cache=None, single_cls=False,
+            # rect 必须与训练一致：训练是方形 640 letterbox，验证强制矩形会引入
+            # 系统性的坐标偏移（1024×768 下图中心差 0.0586，59% 的框 >0.01）。
+            imgsz=overrides.get("imgsz", 640), rect=False, cache=None, single_cls=False,
             task=self._parent.task, fraction=1.0, workers=overrides.get("workers", 2),
             mask_ratio=1, overlap_mask=False, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4,
             degrees=0.0, translate=0.1, scale=0.5, shear=0.0, perspective=0.0,

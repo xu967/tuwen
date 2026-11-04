@@ -130,7 +130,7 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
 
     def _freeze_primary(self):
         """冻结一级全部参数（关系层之外），一级模块保持 eval。"""
-        _, rel = _find_relate_module(self.model)
+        m, rel = _find_relate_module(self.model)
         rel_idx = rel.i
         frozen = trainable = 0
         for name, p in self.model.named_parameters():
@@ -149,9 +149,16 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
                 p.requires_grad = False
         LOGGER.info(f"[RelateTrain] 冻结一级参数 {frozen / 1e6:.2f}M | 关系层可训练 {trainable / 1e6:.2f}M")
         # 一级模块 eval()（BN/dropout 不更新）
-        for i, m in enumerate(self.model.model):
+        for i, sub in enumerate(m.model):
             if i != rel_idx:
-                m.eval()
+                sub.eval()
+        # 文本塔不在 m.model 里，上面的循环管不到它：build_optimizer 里设过一次
+        # eval()，但每个 epoch 的 _model_train 会把整个模型翻回 train，BN 统计量
+        # 随之漂移（实测 20 轮后 num_batches_tracked 涨了 20×156，running_mean
+        # 最大偏移 0.38）。冻结时补一次。
+        te = getattr(m, "text_encoder", None)
+        if te is not None and not any(p.requires_grad for p in te.parameters()):
+            te.eval()
 
     def _setup_train(self, world_size=1):
         """覆写父类：先 dry-run 物化 pair_pool，再正常 setup，最后恢复冻结。
@@ -202,10 +209,16 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         warmup 期 j==0 组（bias）从 warmup_bias_lr 起步——若全部参数挤在
         第 0 组，26M 参数会以 0.1 的预热学习率更新（首轮 relatedness
         爆炸的根因）。分组后 bias 组极小，warmup_bias_lr 语义恢复正确。
+
+        但关系头是随机初始化的，不是预训练 YOLO 头：0.1 的 bias warmup 会把
+        out_norm.bias 从 0 推到 475（50k 第 1 轮），随后场残差吃掉整个 q。
+        基类走 AdamW 时会强制 warmup_bias_lr=0（engine/trainer.py 的 auto 分支），
+        这里覆写了 build_optimizer 绕过了该保护，所以显式对齐。
         """
         _, rel = _find_relate_module(model)
         if rel is None:
             raise ValueError("build_optimizer: 模型中没有 YOLOVORelate 层。")
+        self.args.warmup_bias_lr = 0.0
         g0, g1 = [], []  # weights / biases
         for _mn, module in rel.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
@@ -277,8 +290,18 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
             gt_list.append([(int(r[0]), int(r[1]), int(r[2])) for r in rel_i]
                            if rel_i is not None and len(rel_i) else [])
 
+        # 类别 id 是 PredCls 的定义输入，随框一起进关系头（padding 槽填 0，
+        # 这些槽不会被任何 pair 选中）。
+        cls_pad = None
+        if cls_all is not None:
+            cls_pad = torch.zeros(n_imgs, n_max, dtype=torch.long, device=device)
+            for i in range(n_imgs):
+                if cnt[i]:
+                    cls_pad[i, :cnt[i]] = cls_list[i]
+
         # 关系头整批前向；损失仍逐图计算（七项损失内含逐图归一与 swap 对）
-        o = rel._forward_pairs(rel._batch_feats[0], boxes_pad, counts, gt_list=gt_list)
+        o = rel._forward_pairs(rel._batch_feats[0], boxes_pad, counts, gt_list=gt_list,
+                               box_cls=cls_pad)
 
         sums = {k: None for k in self.LAMBDA_RA}
         n_geo_imgs = 0
@@ -294,17 +317,18 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
                 "boxes": boxes_pad[i:i + 1],
                 "geo_scores": o["geo_scores"][i:i + 1],
                 "zs": o["zs"][i:i + 1], "zo": o["zo"][i:i + 1],
-                # 本图每个槽位的 GT 谓词（-1 表示非 GT），指标累计器用它免掉 tolist()
-                "slot_labels": o["labels"][i][o["sub_idx"][i] * n_max + o["obj_idx"][i]],
+                # 本图每个槽位「全部」GT 谓词的 (slot, pred) 稀疏索引；多谓词对不再 last-wins
+                "slot_gt": (o["gt_slots"][i] if o.get("gt_slots") is not None else None),
             }
+            if "logits_raw" in o:
+                out_i["logits_raw"] = o["logits_raw"][i]
             if "field" in o:
                 out_i["cand_idx"] = o["cand_idx"][i]
                 out_i["field_cos"] = o["field_cos"][i]
                 out_i["field"] = {k: v[i] for k, v in o["field"].items()}
             terms = rel._losses(
-                out_i, [gt_list[i]], o["q"][i:i + 1], o["q_spa"][i:i + 1],
-                o["geo19"][i:i + 1], o["is_gt"][i:i + 1], o["labels"][i:i + 1],
-                o["force"][i:i + 1], o["sub_idx"][i:i + 1], o["obj_idx"][i:i + 1],
+                out_i, [gt_list[i]], o["q"][i:i + 1], o["is_gt"][i:i + 1],
+                o["sub_idx"][i:i + 1], o["obj_idx"][i:i + 1],
                 o["valid_mask"][i:i + 1], o["v_obj"][i:i + 1], boxes_pad[i:i + 1],
                 o["n_boxes"], cls_list[i], box_counts=counts[i:i + 1])
             n_geo_imgs += 1
