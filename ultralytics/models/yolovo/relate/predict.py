@@ -74,11 +74,16 @@ class YOLOVORelatePredictor(DetectionPredictor):
             for bi, r in enumerate(results):
                 boxes = r.boxes.xywhn if r.boxes is not None and len(r.boxes) else torch.zeros((0, 4))
                 boxes = boxes.cpu() if torch.is_tensor(boxes) else torch.as_tensor(boxes)
+                # 类别是关系头的训练输入（cls_proj）；不传会让 v_obj 分布与训练不一致
+                cls = r.boxes.cls if r.boxes is not None and len(r.boxes) else None
+                cls = cls.cpu() if torch.is_tensor(cls) else cls
                 if boxes.shape[0] > MAX_OBJECTS_DEFAULT:
                     conf = r.boxes.conf if r.boxes is not None else None
                     conf = conf.cpu() if torch.is_tensor(conf) else torch.as_tensor(conf)
                     keep = conf.topk(MAX_OBJECTS_DEFAULT).indices
                     boxes = boxes[keep]
+                    if cls is not None:
+                        cls = cls[keep]
                     sub_map = keep
                 else:
                     sub_map = None
@@ -87,7 +92,7 @@ class YOLOVORelatePredictor(DetectionPredictor):
                 else:
                     # img_idx 必须传：capture 里是按 batch 顺序存的逐图特征，
                     # 不传就永远用第 0 张图的特征给整批打分。
-                    rel_out = rel.score(boxes, img_idx=bi).cpu()
+                    rel_out = rel.score(boxes, img_idx=bi, cls=cls.reshape(-1) if cls is not None else None).cpu()
                 if sub_map is not None and rel_out.numel():
                     # 恢复原始框索引
                     rel_out[:, 0] = sub_map[rel_out[:, 0].long()].float()

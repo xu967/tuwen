@@ -119,11 +119,16 @@ class RelateNamespace:
         """
         info = self._require_relate_ckpt("val")
         self._parent._check_is_pytorch_model()
+        # field_fuse 只对本次验证生效：写死在模型上会让之后的 train/predict 沿用，
+        # 而训练期 sigmoid/bg 读的正是 out["logits"]。结束后按原值恢复。
+        restore_fuse = []
         if field_fuse is not None:
             if field_fuse not in ("field", "max", "raw"):
                 raise ValueError(f"field_fuse 只接受 'field' | 'max' | 'raw'，收到 {field_fuse!r}。")
-            for m in self._parent.model.modules():
-                if m.__class__.__name__ == "YOLOVORelate":
+        for m in self._parent.model.modules():
+            if m.__class__.__name__ == "YOLOVORelate":
+                restore_fuse.append((m, getattr(m, "field_fuse", "field")))
+                if field_fuse is not None:
                     m.field_fuse = field_fuse
 
         from ultralytics.utils import DEFAULT_CFG_DICT
@@ -151,7 +156,9 @@ class RelateNamespace:
         vargs = SimpleNamespace(
             # rect 必须与训练一致：训练是方形 640 letterbox，验证强制矩形会引入
             # 系统性的坐标偏移（1024×768 下图中心差 0.0586，59% 的框 >0.01）。
-            imgsz=overrides.get("imgsz", 640), rect=False, cache=None, single_cls=False,
+            # 取 ckpt 训练参数里的 rect，而不是写死 False。
+            imgsz=overrides.get("imgsz", 640), rect=bool(overrides.get("rect", False)),
+            cache=None, single_cls=False,
             task=self._parent.task, fraction=1.0, workers=overrides.get("workers", 2),
             mask_ratio=1, overlap_mask=False, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4,
             degrees=0.0, translate=0.1, scale=0.5, shear=0.0, perspective=0.0,
@@ -172,7 +179,11 @@ class RelateNamespace:
         )
         validator.protocol = protocol
         validator.relate_info = info
-        stats = validator(model=self._parent.model)
+        try:
+            stats = validator(model=self._parent.model)
+        finally:
+            for m, prev in restore_fuse:
+                m.field_fuse = prev
         self._parent.metrics = getattr(validator, "metrics", None)
         return stats
 

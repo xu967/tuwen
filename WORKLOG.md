@@ -1559,3 +1559,51 @@ SGDet 的 pair_acc 不再只对"至少产出一条候选"的图求值。
 - 没修 `train.py` 的 `YOLOVO_CACHE` 默认 1。
 - 没做 M<8 与"完全关闭场散列"之外的更多消融。
 - 未清理 `logs/error_report_26.11.04_*`。
+
+---
+
+## 更新 2026-11-04 对 d8a1d3f 的 diff 复审（3 路并行 + 自检）
+
+### 做了什么
+
+三个代理分别审 `val.py/field_metrics.py`、`head.py`、`trainer.py/dataset.py/namespace.py/train.py`
+的 diff，逐个用合成张量或真实 ckpt 复现；我另做了 `_ap`/pair_acc 的手算单元校验。修了 12 处：
+
+**行为 bug**
+1. `_forward_pairs` 的 `cls_proj` 改为 `getattr`：旧 ckpt（无该层）做 val/续训会 AttributeError。
+   `field_delta_max` 同样兜底。
+2. `_losses` 里 `box_cls.reshape(-1)`：`_compute` 传 [1,N]、trainer 传 [N]，原先 assert 会炸。
+3. `score(pred_topk)` 的 <2 框分支宽度改为 `min(k, V)`，与正常分支一致。
+4. `alpha` 设备迁移改用 `.data` 原地搬，避免 `Parameter.to()` 返回 Tensor 导致 TypeError
+   和 optimizer 持有旧对象。
+5. `gt_slots` 增加框索引/谓词 id 边界过滤，与 `_gt_grid` 一致。
+6. `pair_acc@k` 列数固定为 `pair_topk_k`，某轮低 k 无命中时不再整列消失（否则 results.csv 错位）。
+7. `pred_topk` 入口搬到 CPU，去掉逐对 `.tolist()` 的 CUDA 同步。
+8. `match_by_index` 的守卫从「形状相等」改为「内容相等」（`torch.equal`），避免检测框数
+   恰好等于 GT 框数时按索引错配。
+9. `namespace.val` 的 `field_fuse` 用 try/finally 还原，不再污染后续 train/predict。
+10. `namespace.val` 的 rect 改为取 `overrides["rect"]`，不再写死 False。
+11. `_cache_hash` 混入 `rcoords`。
+12. `build_optimizer` 分组对齐基类：bias / Norm.weight / logit_scale / alpha 不衰减。
+
+**其它**
+- `predict.py` 补传 `cls`，与训练/验证口径一致。
+- `train.py` 的 `YOLOVO_CACHE` 默认值改回 0，注释改为实测口径（41 GiB，cgroup 会拒绝）。
+- 修正 `trainer.py` 与 `ontology.py` 两处与事实不符的注释。
+- `tools/gflops_report.py` 删未用 import，特征取 `base_idx` 而不是第 0 个接线层。
+
+### 未修（记录理由）
+
+- `cls_proj` 让 obj 对齐损失自答（实测 CE 2.05 vs 5.96）：需重训，留到下一轮。
+- `sym` 仍 96.97% 为 True（`SYM_COS_THRESHOLD=0.90` 太低）：改阈值会改变训练行为，留到重训。
+- `neg_lw` 近义列未降权（吃掉 41.9% NCE 质量）：同上。
+- `install_vocabulary` 重建 alpha 会重置学习值：当前路径只装一次，不触发。
+- `YOLOVO_CACHE=disk` 仍会被当成 RAM：仓库内无使用方，未改。
+
+### 验证
+
+- `py_compile` 全部通过。
+- `tests/test_glp_field.py` **24/24 通过**。
+- 重跑 `field_fuse=max` 的 PredCls 验证，指标与修复前逐位一致
+  （R@50=0.4344、predicate_acc=0.4452、pair_acc=0.5494、pair_acc@3=0.7748），
+  且验证结束后 `field_fuse` 已还原为 `field`。

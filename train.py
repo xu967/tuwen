@@ -69,9 +69,11 @@ if __name__ == "__main__" :
             # batch 32 峰值显存约 10–11 GiB；卡上还有别人的大进程时用 YOLOVO_BATCH=16 降级。
             batch=int(os.environ.get("YOLOVO_BATCH", "32")),
             workers=8,
-            # 图像缓存进 RAM：proxy50k 原图约 91 GiB（Ultralytics 按 imgsz 缩放估算，实际存原图）。
-            # 不想要缓存时：YOLOVO_CACHE=0 python train.py
-            cache=os.environ.get("YOLOVO_CACHE", "1").lower() not in ("0", "false", ""),
+            # 默认不缓存：5 万张按 640 缩放后约 41 GiB（不是原图大小），
+            # check_cache_ram 按 1.5× 安全系数估 61.5 GiB，超过容器 cgroup 的 58 GiB，
+            # 会被静默拒绝；41 GiB 本身也会和同 cgroup 的其他进程把内存顶爆。
+            # 想试缓存时：YOLOVO_CACHE=1 python train.py
+            cache=os.environ.get("YOLOVO_CACHE", "0").lower() not in ("0", "false", ""),
             lr0=1e-3,
             project="runs/test",
             name=os.environ.get("YOLOVO_NAME", "glp-relate"),

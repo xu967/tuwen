@@ -63,7 +63,9 @@ def build_ontology(W: torch.Tensor, names=None, sym_thr: float = SYM_COS_THRESHO
     neg_lw.fill_diagonal_(0.0)
 
     # 对称谓词 = 「除自己以外还有同义词」。不能用 pos_mask.any(-1)：对角线恒 True，
-    # 会让 sym 全为 True，swap 方向损失被整体跳过（实测 swap 恒 ≈0.013）。
+    # 会让 sym 几乎全为 True（实测旧式 99.75%，swap 恒 ≈0.013）。
+    # 注意：换成本式后仍是 96.97%——MobileCLIP 文本嵌入上 cos≥0.90 的近邻中位 240 个，
+    # 「有同义词」并不等于「方向对称」。真正的修法是显式对称表或更高阈值，待重训时改。
     sym = (pos_mask.sum(-1) > 1) & ~inverse_mask.any(-1)
     return {"pos_mask": pos_mask, "inverse_mask": inverse_mask,
             "neg_lw": neg_lw, "sym": sym}

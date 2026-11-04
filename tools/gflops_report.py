@@ -16,7 +16,6 @@ FLOPs 由 torch 官方 `FlopCounterMode` 按 aten 算子累加（conv/mm/addmm/b
 from __future__ import annotations
 
 import argparse
-import copy
 import os
 import sys
 
@@ -82,7 +81,8 @@ def main() -> int:
 
     if rel is None:
         return 0
-    base = cap["feats"][0]
+    # 关系头用的是 feats[base_idx]（head.py 的 base_idx），不是第 0 个接线层
+    base = cap["feats"][getattr(rel, "base_idx", 0)]
     g = torch.Generator().manual_seed(0)
     boxes = torch.rand(1, args.boxes, 4, generator=g, device=dev) * 0.5 + 0.25
     boxes[..., 2:] = boxes[..., 2:] * 0.4 + 0.05

@@ -363,7 +363,10 @@ class YOLOVORelate(nn.Module):
         device = boxes_b.device
 
         v_obj = self.spatial_pool(F_map, boxes_b)             # [B,N,768]
-        if box_cls is not None and self.W_obj.numel():
+        # getattr：d8a1d3f 之前的 ckpt 没有 cls_proj，不能懒建一个随机层，
+        # 旧权重本来就没训过它，跳过注入即可（与训练时的口径一致）。
+        cls_proj = getattr(self, "cls_proj", None)
+        if box_cls is not None and self.W_obj.numel() and cls_proj is not None:
             # 类别是 PredCls 的定义输入；不喂的话模型只能从外观反推，实测低于
             # 只用 (subj_cls,obj_cls) 查表的 32.3%。W_obj 冻结，cls_proj 可学。
             if self.W_obj.device != device:
@@ -412,6 +415,15 @@ class YOLOVORelate(nn.Module):
                     gt_slots.append((empty, empty))
                     continue
                 g = torch.tensor(gt_list[b], dtype=torch.long, device=device)     # [G,3]
+                # 与 _gt_grid 一致的边界守卫：越界的框索引会让 flat 与别的有序对相撞，
+                # 越界的谓词 id 会直接 IndexError。
+                V = int(self.vocab_head.W.shape[0])
+                ok = ((g[:, 0] >= 0) & (g[:, 0] < N) & (g[:, 1] >= 0) & (g[:, 1] < N)
+                      & (g[:, 2] >= 0) & (g[:, 2] < V))
+                g = g[ok]
+                if not g.numel():
+                    gt_slots.append((empty, empty))
+                    continue
                 flat = sub_idx[b] * N + obj_idx[b]                                # [K]
                 hit = flat.unsqueeze(1) == (g[:, 0] * N + g[:, 1]).unsqueeze(0)   # [K,G]
                 k_idx, g_idx = hit.nonzero(as_tuple=True)
@@ -477,7 +489,9 @@ class YOLOVORelate(nn.Module):
         if self.field_read is not None:
             if self.vocab_head.W.device != logits.device:
                 self.vocab_head.W = self.vocab_head.W.to(logits.device)
-                self.vocab_head.alpha = self.vocab_head.alpha.to(logits.device)
+                # alpha 是 Parameter：赋值 .to() 的返回值会抛 TypeError，也会让
+                # optimizer 持有旧对象。原地搬 data 保留身份。
+                self.vocab_head.alpha.data = self.vocab_head.alpha.data.to(logits.device)
             V = self.vocab_head.W.shape[0]
             m = min(int(self.field_cfg.n_candidates), V)
             cand = self._select_candidates(logits, pred_labels, valid_mask, m, training,
@@ -493,7 +507,8 @@ class YOLOVORelate(nn.Module):
             # 残差无界会让 q_f 的归一化梯度失控：实测 delta_norm 从 24 涨到 50 后，
             # 下一轮 loss 直接变 NaN。按范数做投影截断（超出的部分等比缩回），不新增参数。
             dnorm = delta.norm(dim=-1, keepdim=True)
-            delta = delta * (self.field_delta_max / dnorm.clamp_min(self.field_delta_max))
+            dmax = getattr(self, "field_delta_max", 16.0)  # 旧 ckpt 没有该属性
+            delta = delta * (dmax / dnorm.clamp_min(dmax))
             res = self.q_res_proj(delta)
             # delta 截断只防 fp16 溢出，防不住退化：q_res_proj 的输出仍可达 ||q|| 的
             # 228 倍，且候选维度变化为 0，散列后把 raw 检索分数整个盖成常量噪声。
@@ -576,12 +591,15 @@ class YOLOVORelate(nn.Module):
         from .ra.ontology import build_ontology  # noqa: F401  (tables already on self.onto)
         device = q.device
         n_b = int(box_counts[0]) if box_counts is not None else N
+        # trainer 传 1-D（本图框数），_compute 传 [1,N]；统一展平
+        if box_cls is not None:
+            box_cls = box_cls.reshape(-1)
         if self.onto is not None:
             for kt, tt in self.onto.items():
                 self.onto[kt] = tt.to(device)
         if self.vocab_head.W.device != device:
             self.vocab_head.W = self.vocab_head.W.to(device)
-            self.vocab_head.alpha = self.vocab_head.alpha.to(device)
+            self.vocab_head.alpha.data = self.vocab_head.alpha.data.to(device)
         if self.W_obj.numel() and self.W_obj.device != device:
             self.W_obj = self.W_obj.to(device)
         V = self.vocab_head.W.shape[0]
@@ -784,7 +802,10 @@ class YOLOVORelate(nn.Module):
         boxes = boxes.to(base.device).detach().float()
         if boxes.shape[0] < 2:
             rows = boxes.new_zeros((0, 5))
-            return (rows, boxes.new_zeros((0, pred_topk), dtype=torch.long)) \
+            # 宽度必须与正常分支一致（min(k, V)），否则逐图 cat 会 size mismatch
+            k = min(int(pred_topk), int(self.vocab_head.W.shape[0])) if self.vocab_head.W.numel() \
+                else int(pred_topk)
+            return (rows, boxes.new_zeros((0, k), dtype=torch.long)) \
                 if pred_topk is not None else rows
         out = self._compute(base, boxes.unsqueeze(0), gt_list=None,
                             eval_budget=topk or self.eval_budget,

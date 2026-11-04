@@ -141,6 +141,11 @@ class FieldMetricAccumulator:
         if si.numel():
             slot_has.scatter_(0, si, True)
             self.n_pred = self.n_pred + slot_has.sum()
+            # 候选预算截断会让部分 GT 有序对根本不进候选（>64 对的图），它们既不在
+            # 分子也不在分母，会把 top-k 指标系统性抬高。用 gt_list 对账补进分母。
+            if gt_list:
+                self.n_pred = self.n_pred + max(
+                    0, len({(int(s), int(o)) for (s, o, _p) in gt_list[0]}) - int(slot_has.sum()))
             lg = logits[si]
             # 检索口径的 GT 是否落进 field 候选：cand_idx 是「强制塞入 GT」之后的候选表，
             # 拿它比对恒为 1，必须用未散列的检索分数重新取 top-M（推理时就是这么取的）。

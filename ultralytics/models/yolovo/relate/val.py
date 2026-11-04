@@ -64,6 +64,7 @@ class RelateEvaluator:
         self.exist_missed = 0
         self.pair_topk_hits = {}   # k -> 命中数（该对 top-k 谓词命中任一 GT 谓词）
         self.pair_topk_total = 0
+        self.pair_topk_k = 0       # 列数固定，避免某轮没命中时整列消失导致 csv 错位
 
     def update(self, pred_boxes, pred_rels, gt_boxes, gt_rels, topk=100, pred_topk=None):
         """v3 指标更新。pred_rels [P,5] = (s, o, pred_id, 融合分, 存在性分)。
@@ -80,6 +81,7 @@ class RelateEvaluator:
         pred_rels = pred_rels.cpu() if torch.is_tensor(pred_rels) else pred_rels
         gt_boxes = gt_boxes.cpu() if torch.is_tensor(gt_boxes) else gt_boxes
         gt_rels = gt_rels.cpu() if torch.is_tensor(gt_rels) else gt_rels
+        pred_topk = pred_topk.cpu() if torch.is_tensor(pred_topk) else pred_topk
         R = gt_rels.shape[0] if gt_rels is not None and gt_rels.numel() else 0
         self.gt_total += R
         # 本图唯一有序对 -> 该对的全部 GT 谓词
@@ -109,11 +111,13 @@ class RelateEvaluator:
         pp = pred_sorted[:, 2].long()
         if pred_topk is not None:
             pred_topk = pred_topk[order]
+            self.pair_topk_k = max(self.pair_topk_k, int(pred_topk.shape[1]))
         exist_scores = pred_sorted[:, 4] if pred_sorted.shape[1] >= 5 else pred_sorted[:, 3]
         # 同一张 IoU 矩阵下面到处复用。PredCls 下 pred 框就是 GT 框，用单位阵等价于
-        # 按索引配对，且不会被重叠框配到另一对。
-        if R and self.match_by_index and pred_boxes.shape[0] == gt_boxes.shape[0]:
-            # 行=GT 框、列=预测框；R 是关系行数，不能拿来当框数
+        # 按索引配对，且不会被重叠框配到另一对。只比形状不够：检测框数与 GT 框数
+        # 偶然相等时会把两套不同的框按索引错配。
+        if R and self.match_by_index and torch.is_tensor(pred_boxes) \
+                and pred_boxes.shape == gt_boxes.shape and torch.equal(pred_boxes, gt_boxes):
             iou = torch.eye(gt_boxes.shape[0], dtype=torch.float32)
         else:
             iou = box_iou(_xywh2xyxy(gt_boxes), _xywh2xyxy(pred_boxes)) if R else None
@@ -231,9 +235,10 @@ class RelateEvaluator:
             out["pair_acc"] = self.pa_pair_correct / max(1, self.pa_pair_total)
             out["pair_acc_denominator"] = self.pa_pair_total
             # 每对 top-k 谓词的命中率：标准 graph-constrained R@K 只取 argmax，
-            # 这一组是 ngR@K 口径的补充指标，不能和 R@50 混比。
-            for k, v in sorted(self.pair_topk_hits.items()):
-                out[f"pair_acc@{k}"] = v / max(1, self.pair_topk_total)
+            # 这一组是 ngR@K 口径的补充指标，不能和 R@50 混比。列数固定为 pair_topk_k，
+            # 否则某轮没有低 k 命中时整列消失，results.csv 的表头会对不上。
+            for k in range(1, self.pair_topk_k + 1):
+                out[f"pair_acc@{k}"] = self.pair_topk_hits.get(k, 0) / max(1, self.pair_topk_total)
             out["DetPairRecall"] = self.det_pair_hits / self.det_pair_total if self.det_pair_total else 0.0
             out["PairRecall"] = (
                 self.pair_recall_hits / self.pair_recall_total if self.pair_recall_total else 0.0
@@ -420,14 +425,15 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
             if rel is not None and labels.shape[0] >= 2:
                 res, top_k = rel.score(labels.cpu(), img_idx=i, cls=cls_i,
                                        pred_topk=self._PAIR_TOPK)
+            # PredCls 口径恒记一份（<2 框的图没有 pair 可打分，但 GT 行仍要计入）。
+            # sgcls 下主轴也用 GT 框，两份数值相同但列集合因此不随协议变化。
+            pc_rels = res if res is not None else _t.zeros((0, 5))
+            self.evaluator_pc.update(labels.cpu(), pc_rels, labels, rels_i, pred_topk=top_k)
             if sgcls:
                 if res is not None:
                     pred_rels, pred_boxes = res, labels.cpu()
                 self.evaluator.update(pred_boxes, pred_rels, labels, rels_i, pred_topk=top_k)
             else:
-                # 照常更新 pc_ 分母：<2 框的图没有 pair 可打分，但 GT 行仍要计入
-                pc_rels = res if res is not None else _t.zeros((0, 5))
-                self.evaluator_pc.update(labels.cpu(), pc_rels, labels, rels_i, pred_topk=top_k)
                 self.evaluator.update(pred_boxes, pred_rels, labels, rels_i)
 
     def get_stats(self):

@@ -277,12 +277,14 @@ class YOLOVORelateDataset(YOLODataset):
         super().__init__(*args, data=data, task=task, **kwargs)
 
     def _cache_hash(self) -> str:
-        """标签缓存指纹：路径+字节数之外再混入谓词词表。
+        """标签缓存指纹：路径+字节数之外再混入谓词词表与 rcoords。
 
-        只看路径和文件大小时，改了 data.yaml 的 rnames（关系行内容不变）会静默
-        命中旧 cache，整份数据集按旧谓词 id 训练。
+        只看路径和文件大小时，改了 data.yaml 的 rnames / rcoords（关系行内容不变）
+        会静默命中旧 cache，整份数据集按旧谓词 id 或旧坐标约定训练。
+        注意 get_hash 只累加总字节数：同字数的标签改动仍会漏检，改标注后删缓存最稳。
         """
-        fp = hashlib.sha256(repr(sorted(self.rnames.items())).encode()).hexdigest()
+        fp = hashlib.sha256(
+            (repr(sorted(self.rnames.items())) + "|" + str(self.rcoords)).encode()).hexdigest()
         return get_hash(self.label_files + self.im_files) + fp[:16]
 
     # ------------------------------------------------------------------

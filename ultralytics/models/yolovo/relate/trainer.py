@@ -152,10 +152,9 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         for i, sub in enumerate(m.model):
             if i != rel_idx:
                 sub.eval()
-        # 文本塔不在 m.model 里，上面的循环管不到它：build_optimizer 里设过一次
-        # eval()，但每个 epoch 的 _model_train 会把整个模型翻回 train，BN 统计量
-        # 随之漂移（实测 20 轮后 num_batches_tracked 涨了 20×156，running_mean
-        # 最大偏移 0.38）。冻结时补一次。
+        # 文本塔不在 m.model 里，上面的循环管不到它：每个 epoch 的 _model_train
+        # 会把整个模型翻回 train，BN 统计量随之漂移（实测 20 轮后
+        # num_batches_tracked 涨了 20×156，running_mean 最大偏移 0.38）。冻结时补一次。
         te = getattr(m, "text_encoder", None)
         if te is not None and not any(p.requires_grad for p in te.parameters()):
             te.eval()
@@ -219,10 +218,16 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         if rel is None:
             raise ValueError("build_optimizer: 模型中没有 YOLOVORelate 层。")
         self.args.warmup_bias_lr = 0.0
-        g0, g1 = [], []  # weights / biases
+        # 与基类 engine/trainer.py 的分组规则对齐：bias、Norm 权重、logit_scale 不衰减。
+        # alpha 是路由门的系数，也不该被 AdamW 每步向 0 收缩。
+        norm = tuple(v for k, v in torch.nn.__dict__.items() if "Norm" in k)
+        g0, g1 = [], []  # weights / no-decay
         for _mn, module in rel.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
-                (g1 if param_name == "bias" else g0).append(param)
+                no_decay = ("bias" in param_name or "alpha" in param_name
+                            or "logit_scale" in param_name
+                            or (isinstance(module, norm) and param_name == "weight"))
+                (g1 if no_decay else g0).append(param)
         opt = torch.optim.AdamW(g1, lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
         opt.add_param_group({"params": g0, "weight_decay": decay})
         return opt
