@@ -36,11 +36,71 @@ def _find_relate_module(model):
     return m, None
 
 
+class _RelateOnlyEMA:
+    """ModelEMA 的关系层子集版：只对 ``prefix`` 开头的浮点张量做滑动平均。
+
+    其余（冻结的一级模型/文本塔）在 deepcopy 时已与训练模型一致，且训练中不变，
+    跳过它们对 EMA 权重无影响。接口与 ``ultralytics.utils.torch_utils.ModelEMA`` 一致
+    （ema / updates / decay / enabled / update / update_attr），trainer 其余代码不感知。
+    """
+
+    def __init__(self, model, rel_idx: int, decay=0.9999, tau=2000, updates=0):
+        import math
+        from copy import deepcopy
+
+        from ultralytics.utils.torch_utils import de_parallel
+
+        self.ema = deepcopy(de_parallel(model)).eval()
+        self.updates = updates
+        self.decay = lambda x: decay * (1 - math.exp(-x / tau))
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+        self.enabled = True
+        self._idx = int(rel_idx)
+        # 只取关系层的 state_dict（不含前缀）：整模型 state_dict() 每步重建一遍
+        # 约 1,000 个张量的 OrderedDict，本身就占 3% 主线程时间。
+        self._keys = [k for k, v in self.ema.model[self._idx].state_dict().items()
+                      if v.dtype.is_floating_point]
+
+    def update(self, model):
+        if not self.enabled:
+            return
+        from ultralytics.utils.torch_utils import de_parallel
+
+        self.updates += 1
+        d = self.decay(self.updates)
+        msd = de_parallel(model).model[self._idx].state_dict()
+        esd = self.ema.model[self._idx].state_dict()
+        for k in self._keys:
+            v = esd[k]
+            v *= d
+            v += (1 - d) * msd[k].detach()
+
+    def update_attr(self, model, include=(), exclude=("process_group", "reducer")):
+        if self.enabled:
+            from ultralytics.utils.torch_utils import copy_attr
+
+            copy_attr(self.ema, model, include, exclude)
+
+
 class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
     """Overlay for any YOLOVO task trainer: keep the relate graph, freeze primary."""
 
     def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
+        import os
+        from pathlib import Path
+
+        # 父类 __init__ 在 exist_ok=True 且 args.resume 为假时会删掉旧 results.csv；
+        # 我们的续训走 YOLOVO_RESUME 环境变量（不走 args.resume），先把它备份下来。
+        csv_backup = None
+        if os.environ.get("YOLOVO_RESUME", "").strip() and overrides:
+            p = Path(str(overrides.get("project") or "runs")) / str(overrides.get("name") or "") / "results.csv"
+            if p.is_file():
+                csv_backup = p.read_text(encoding="utf-8")
         super().__init__(cfg, overrides, _callbacks)
+        if csv_backup and not self.csv.exists():
+            self.csv.write_text(csv_backup, encoding="utf-8")
+            LOGGER.info(f"[RelateTrain] 续训：已恢复 {self.csv}（{csv_backup.count(chr(10)) - 1} 行历史指标）")
         if getattr(self.args, "model_scale", None):
             raise ValueError("rel.train 不支持 model_scale/scale；关系层结构直接来自 checkpoint。")
         # 数据 yaml 必须带 rnames（谓词词表）
@@ -78,7 +138,13 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         return self.compute_loss(batch, preds)
 
     def setup_model(self):
-        """跳过 YAML 重建；丢弃 pickled criterion（关系 trainer 全路径接管 loss）。"""
+        """跳过 YAML 重建；丢弃 pickled criterion（关系 trainer 全路径接管 loss）。
+
+        返回值交给父类 ``resume_training``：设置环境变量 ``YOLOVO_RESUME=<train-checkpoint.pt>``
+        时加载关系头权重并返回该 ckpt dict（含 optimizer/epoch/best_fitness），父类据此恢复
+        优化器状态与 start_epoch。不走 ``args.resume``：那条路会用 ``attempt_load_weights``
+        重建模型，绕过两步构建。
+        """
         if not isinstance(self.model, torch.nn.Module):
             self.model = self.get_model()
         if hasattr(self.model, "criterion"):
@@ -86,6 +152,53 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         _, rel = _find_relate_module(self.model)
         if rel is None:
             raise ValueError("注入的模型没有 YOLOVORelate 层：请检查 model.rel.train 的构建路径。")
+        return self._load_resume_ckpt(rel)
+
+    def _load_resume_ckpt(self, rel):
+        """从 train-checkpoint.pt 恢复关系头参数；返回 ckpt dict 或 None。
+
+        兼容两种格式：旧版 ``model`` 是整模型 half 深拷贝（只取关系层参数，W/W_obj 缓冲
+        不覆盖，避免 fp16 取整进 fp32 词表）；新版 ``rel_state`` 是关系层 fp32 state_dict。
+        """
+        import os
+
+        path = os.environ.get("YOLOVO_RESUME", "").strip()
+        if not path:
+            return None
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"YOLOVO_RESUME 指向的文件不存在: {path}")
+        # 旧格式 pickle 引用顶层 mobileclip.*：先注入 _vendor 路径
+        import ultralytics.models.yolovo.text_tower.mobileclip.factory  # noqa: F401
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        if "rel_state" in ckpt:
+            state = {k: v.float() if v.is_floating_point() else v for k, v in ckpt["rel_state"].items()}
+            missing, unexpected = rel.load_state_dict(state, strict=False)
+            src = "rel_state(fp32)"
+        else:
+            m = ckpt.get("model")
+            if m is None:
+                raise ValueError(f"{path} 既没有 rel_state 也没有 model，不能续训。")
+            _, rel_src = _find_relate_module(m)
+            if rel_src is None:
+                raise ValueError(f"{path} 的模型里没有 YOLOVORelate 层。")
+            params = dict(rel_src.named_parameters())
+            state = {k: v.detach().float() for k, v in params.items()}
+            missing, unexpected = rel.load_state_dict(state, strict=False)
+            # 只允许缓冲（W/W_obj/sigma_weights）缺失：它们由当前词表重新编码
+            bufs = {k for k, _ in rel.named_buffers()}
+            missing = [k for k in missing if k not in bufs]
+            src = "model(half)->params"
+        if missing or unexpected:
+            raise RuntimeError(f"续训权重与当前关系头不匹配: missing={missing[:5]} unexpected={unexpected[:5]}")
+        if os.environ.get("YOLOVO_RESUME_RESET_BEST", "0") == "1":
+            # 旧 run 的 best_fitness 若来自口径不同的 val（例如换了 val 标签），应清零，
+            # 否则新 run 的 best.pt 可能永远不会被写出。
+            ckpt["best_fitness"] = None
+        self.resume = True
+        self._resume_meta = {"ema_updates": int(ckpt.get("ema_updates", 0) or 0), "path": path}
+        LOGGER.info(f"[RelateTrain] 从 {path} 恢复关系头（{src}），epoch={ckpt.get('epoch')}，"
+                    f"best_fitness={ckpt.get('best_fitness')}")
+        return ckpt
 
     def build_dataset(self, img_path, mode="train", batch=None):
         """关系训练/验证数据集：R 行解析 + 行号寻址（标准校验会把 R 行当 corrupt）。"""
@@ -169,6 +282,20 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         self._materialize_pool()
         super()._setup_train(world_size)
         self._freeze_primary()  # 父类解冻后立即恢复
+        # EMA 只跟踪关系层：父类 ModelEMA 每步遍历整模型 state_dict（一级模型 + 文本塔
+        # 全部冻结，EMA 对它们恒等），实测占训练步 7.9% 的主线程时间。
+        if getattr(self, "ema", None) is not None:
+            _, rel = _find_relate_module(self.model)
+            if rel is not None:
+                updates = int(self.ema.updates)
+                meta = getattr(self, "_resume_meta", None)
+                if meta:
+                    # 续训：EMA 从恢复的权重重新起步；updates 用保存值（旧格式没有则按
+                    # 已完成 epoch 的优化器步数估算），避免 decay 从 0 再爬一次 tau=2000。
+                    nb = len(self.train_loader)
+                    est = (self.start_epoch * nb) // max(int(getattr(self, "accumulate", 1)), 1)
+                    updates = int(meta.get("ema_updates") or est)
+                self.ema = _RelateOnlyEMA(self.model, rel_idx=rel.i, updates=updates)
 
     def _materialize_pool(self):
         """物化延迟构建的子模块（进 AdamW 参数组）。
@@ -312,6 +439,16 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         n_geo_imgs = 0
         nce_vals = []
         field_diag = {}
+        # 训练期场指标（FieldMetricAccumulator）只用于 epoch 末的 [FieldMetrics] 日志行，
+        # 不进损失。逐图全量累计占主线程约 7%（py-spy 实测），改为每 N 个 batch 采样一次；
+        # YOLOVO_FIELD_METRICS_EVERY=1 恢复逐 batch 全量统计。
+        self._batch_counter = getattr(self, "_batch_counter", -1) + 1
+        fm_every = getattr(self, "_field_metrics_every", None)
+        if fm_every is None:
+            import os
+            fm_every = max(int(os.environ.get("YOLOVO_FIELD_METRICS_EVERY", "8") or 1), 1)
+            self._field_metrics_every = fm_every
+        do_field_metrics = (self._batch_counter % fm_every) == 0
         for i in range(n_imgs):
             if cnt[i] < 2:
                 continue
@@ -346,7 +483,8 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
                 if self._field_metrics is None:
                     self._field_metrics = FieldMetricAccumulator(
                         int(rel.vocab_head.W.shape[0]))
-                self._field_metrics.update(out_i, [gt_list[i]])
+                if do_field_metrics:
+                    self._field_metrics.update(out_i, [gt_list[i]])
                 for k, v in o.get("field_diag", {}).items():
                     field_diag[k] = field_diag.get(k, 0.0) + v[i]  # 张量累加，末尾一次取值
             for k in self.LAMBDA_RA:
@@ -416,12 +554,15 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         # EMA/优化器清空、fp16），"下轮从 best 续训"对它们不成立——
         # 每轮另存一份带优化器状态的 train-checkpoint.pt（epoch 末覆盖）。
         if self.last is not None and hasattr(self, "optimizer") and self.optimizer is not None:
-            from copy import deepcopy as _dp
-
+            # 只存关系层 fp32 state_dict（约 110 MB）而不是整模型 half 深拷贝（1.1 GB）：
+            # 一级模型冻结、可由 YOLOVO_PRIMARY 重建；half 会把 alpha/W 取整到 fp16，
+            # 续训时精度已丢。读取侧 _load_resume_ckpt 兼容旧格式。
+            _, rel_m = _find_relate_module(model)
             train_ckpt = {
                 "epoch": self.epoch,
                 "best_fitness": self.best_fitness,
-                "model": _dp(de_parallel(self.model)).half(),  # 同父类保存约定
+                "rel_state": {k: v.detach().cpu() for k, v in rel_m.state_dict().items()},
+                "ema_updates": int(getattr(self.ema, "updates", 0)) if getattr(self, "ema", None) else 0,
                 "optimizer": self.optimizer.state_dict(),
                 "train_args": vars(self.args) if hasattr(self.args, "__dict__") else dict(self.args),
             }

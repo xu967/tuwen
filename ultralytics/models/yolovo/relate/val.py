@@ -404,7 +404,8 @@ class RelateMetricsMixin(_TypedValBase):  # type: ignore[misc,valid-type]
                 cx = (b[:, 0] + b[:, 2]) / 2
                 cy = (b[:, 1] + b[:, 3]) / 2
                 ih, iw = batch["img"].shape[-2:]
-                pred_boxes = _t.stack([cx / iw, cy / ih, wh[:, 0] / iw, wh[:, 1] / iw], dim=1).cpu()
+                # 高度按 ih 归一化（原来误除以 iw；rect=False 的 640 方图下两者相等，不影响历史数字）
+                pred_boxes = _t.stack([cx / iw, cy / ih, wh[:, 0] / iw, wh[:, 1] / ih], dim=1).cpu()
             else:
                 # 没有检测框 ≠ "预测框就是 GT 框"。用 GT 会让 DetPairRecall 恒 1.0。
                 pred_boxes = _t.zeros((0, 4))

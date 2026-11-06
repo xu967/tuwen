@@ -222,8 +222,24 @@ def encode_predicate_bank(model, rnames: Dict[int, str]):
     每个谓词对全部模板编码后取归一化均值再归一化；tripwire 共享串同样编码，
     供加载侧比对（cos>0.999 表示同一编码器+模板空间）。
     """
+    import os
+
     was_training = model.training
     model.eval()
+    # attach 发生在模型搬到 GPU 之前：10,370 谓词 × 3 模板 ≈ 31k 条文本在 CPU 上要跑 6~7 分钟
+    # （每次启动都重复）。有卡时把文本塔临时搬到 GPU 编码，结束后搬回原设备；
+    # 编码结果只差浮点舍入（~1e-6），tripwire 容差 1e-3 不受影响。YOLOVO_TEXT_ENCODE_GPU=0 关闭。
+    te = getattr(model, "text_encoder", None)
+    te_dev = None
+    if te is not None and torch.cuda.is_available() and os.environ.get("YOLOVO_TEXT_ENCODE_GPU", "1") != "0":
+        try:
+            te_dev = next(te.parameters()).device
+        except StopIteration:
+            te_dev = None
+        if te_dev is not None and te_dev.type == "cuda":
+            te_dev = None  # 已在 GPU，无需搬动
+        elif te_dev is not None:
+            te.to("cuda")
     try:
         ids = sorted(rnames)
         texts, owner = [], []  # owner: (predicate_id, template_idx)
@@ -233,7 +249,8 @@ def encode_predicate_bank(model, rnames: Dict[int, str]):
                 owner.append((pid, len(TRAIN_TEMPLATES)))
         texts.append(_TRIPWIRE_STRING)
         # 分批编码：RA-4M 的 10,370 谓词 × 3 模板一次进塔会 OOM。
-        emb = torch.cat([model.encode_text(texts[i:i + 512]) for i in range(0, len(texts), 512)])
+        emb = torch.cat([model.encode_text(texts[i:i + 512]).float().cpu()
+                         for i in range(0, len(texts), 512)])
         if not torch.is_tensor(emb):
             emb = torch.tensor(emb)
         trip = emb[-1]
@@ -245,6 +262,8 @@ def encode_predicate_bank(model, rnames: Dict[int, str]):
         trip_cos = float(torch.dot(W[0], trip).clamp(-1, 1)) if V else 0.0
         return W.cpu(), int(text_dim), trip_cos
     finally:
+        if te_dev is not None:
+            te.to(te_dev)
         if was_training:
             model.train()
 

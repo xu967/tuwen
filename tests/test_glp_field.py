@@ -425,3 +425,31 @@ def test_batched_forward_matches_per_image_losses():
                               gt_list=[gt[i]], box_cls=cls[i].unsqueeze(0))
         for k in ("nce", "swap", "sigmoid", "obj", "bg", "geo", "rel"):
             assert abs(float(batched[k]) - float(single[k])) < 1e-4, (i, k, batched[k], single[k])
+
+
+def test_cfa_geo_residual_and_box_drop():
+    """RA 配方三项补齐：零初始化几何残差、同谓词混合、角点 token dropout。"""
+    rel = _relate_head(FieldConfig(mode="off"))
+    # 1) geo 残差零初始化：新建模型 q_spa 与旧行为一致
+    assert float(rel.geo_res_proj(torch.randn(2, 5, 32)).abs().max()) == 0.0
+    # 2) cfa：同谓词槽位被混合，独苗槽位保持不变
+    torch.manual_seed(0)
+    rel.cfa_prob = 1.0
+    v_s, v_o = torch.randn(1, 4, 8), torch.randn(1, 4, 8)
+    labels = torch.tensor([[0, 0, 1, 2]])
+    ok = torch.ones(1, 4, dtype=torch.bool)
+    a, b = rel._mix_entities(v_s, v_o, labels, ok)
+    assert torch.allclose(a[0, 2], v_s[0, 2]) and torch.allclose(b[0, 3], v_o[0, 3])
+    assert not (torch.allclose(a[0, 0], v_s[0, 0]) and torch.allclose(a[0, 1], v_s[0, 1]))
+    # 3) 训练期两条路径可跑通、有梯度
+    rel.train()
+    rel.cfa_prob, rel.box_token_dropout = 0.5, 1.0
+    base = torch.randn(1, 32, 8, 8)
+    boxes = torch.rand(1, 8, 4) * 0.5 + 0.25
+    boxes[..., 2:] = boxes[..., 2:].clamp_min(0.05)
+    out = rel._compute(base, boxes, gt_list=[[(0, 1, 0), (2, 3, 1)]],
+                       box_cls=torch.zeros(8, dtype=torch.long))
+    loss = sum(v for k, v in out.items()
+               if k in ("nce", "swap", "sigmoid", "obj", "bg", "geo", "rel"))
+    loss.backward()
+    assert torch.isfinite(loss)

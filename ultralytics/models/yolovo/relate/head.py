@@ -267,6 +267,23 @@ class YOLOVORelate(nn.Module):
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
 
+        # RA recipe 里训练期才生效、且不新增可学结构的两个机制。
+        # cfa：同谓词槽位特征混合（relsgg.py _mix_entities，ablation 记 +10.1% tail mR）。
+        # box_token_dropout：按图丢弃 4 个角点 token（config.py 默认 0.3），
+        # transformer 早已支持，之前从未接线。
+        self.cfa_prob = 0.5
+        self.cfa_alpha = 1.0
+        self.box_token_dropout = 0.3
+
+        # 空间专家缺一条学习几何通路：RA 的 q_spa 吃 geo_encoder 的 512 维输出，
+        # 我们只喂了 19 维原始几何。零初始化残差补上，旧 ckpt 无此属性时行为不变。
+        self.geo_res_proj = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, text_dim))
+        nn.init.xavier_uniform_(self.geo_res_proj[0].weight)
+        nn.init.zeros_(self.geo_res_proj[0].bias)
+        nn.init.zeros_(self.geo_res_proj[2].weight)   # 只零初始化最后一层
+        nn.init.zeros_(self.geo_res_proj[2].bias)
+
         # dual-query composition (gates start small: training begins from the
         # pure pair-context query, RA init 0.1)
         self.sub_text_proj = nn.Linear(backbone_dim, text_dim, bias=False)
@@ -336,6 +353,53 @@ class YOLOVORelate(nn.Module):
         z = self._ensure_fmap_proj(base.shape[1], base.device)(base)  # [B,768,h,w]
         return z.permute(0, 2, 3, 1).contiguous()
 
+    # ------------------------------------------------------------ cfa
+
+    @staticmethod
+    def _mix_partners(labels: torch.Tensor, ok: torch.Tensor):
+        """Same-predicate partner slots for cfa (port of relsgg.py:174-195).
+
+        ``labels``/``ok`` are flattened ``[B*K]``; returns ``(src, dst)`` or None.
+        """
+        idx = ok.reshape(-1).nonzero(as_tuple=True)[0]
+        if idx.numel() < 2:
+            return None
+        g = labels.reshape(-1)[idx]
+        order = torch.argsort(g)
+        _, counts = torch.unique_consecutive(g[order], return_counts=True)
+        starts = torch.cumsum(counts, 0) - counts
+        start_per = torch.repeat_interleave(starts, counts)
+        count_per = torch.repeat_interleave(counts, counts)
+        pos = torch.arange(g.shape[0], device=g.device) - start_per
+        r = (torch.rand(g.shape[0], device=g.device) * (count_per - 1).clamp(min=1)).long()
+        r = torch.minimum(r, (count_per - 2).clamp(min=0))
+        r = r + (r >= pos).long()
+        keep = count_per > 1
+        if not bool(keep.any()):
+            return None
+        src = idx[order[keep]]
+        dst = idx[order[(start_per + r)[keep]]]
+        return (src, dst) if src.numel() else None
+
+    def _mix_entities(self, v_sub, v_obj_k, labels, ok):
+        """Blend subject/object features of slots sharing a predicate (label-preserving)."""
+        pairs = self._mix_partners(labels, ok)
+        if pairs is None:
+            return v_sub, v_obj_k
+        src, dst = pairs
+        n, dev = src.shape[0], src.device
+        conc = torch.full((1,), float(getattr(self, "cfa_alpha", 1.0)), device=dev)
+        lam = torch.distributions.Beta(conc, conc).sample((n,)).reshape(n)
+        lam = torch.where(torch.rand(n, device=dev) < getattr(self, "cfa_prob", 0.5),
+                          lam, torch.ones_like(lam)).unsqueeze(-1)
+        out = []
+        for x in (v_sub, v_obj_k):
+            flat = x.reshape(-1, x.shape[-1])
+            mixed = flat.clone()
+            mixed[src] = lam * flat[src] + (1.0 - lam) * flat[dst]
+            out.append(mixed.reshape(x.shape))
+        return out[0], out[1]
+
     # ------------------------------------------------------------ forward
 
     def forward(self, x, feat_batch_idx: Optional[int] = None):
@@ -378,13 +442,15 @@ class YOLOVORelate(nn.Module):
         # getattr：d8a1d3f 之前的 ckpt 没有 cls_proj，不能懒建一个随机层，
         # 旧权重本来就没训过它，跳过注入即可（与训练时的口径一致）。
         cls_proj = getattr(self, "cls_proj", None)
+        cls_emb = None
         if box_cls is not None and self.W_obj.numel() and cls_proj is not None:
             # 类别是 PredCls 的定义输入；不喂的话模型只能从外观反推，实测低于
             # 只用 (subj_cls,obj_cls) 查表的 32.3%。W_obj 冻结，cls_proj 可学。
             if self.W_obj.device != device:
                 self.W_obj = self.W_obj.to(device)
             cid = box_cls.to(device).long().clamp(0, self.W_obj.shape[0] - 1)
-            v_obj = v_obj + self.cls_proj(self.W_obj[cid])
+            cls_emb = cls_proj(self.W_obj[cid])
+            v_obj = v_obj + cls_emb
         is_gt = labels = None
         training = gt_list is not None
         if training:
@@ -449,8 +515,16 @@ class YOLOVORelate(nn.Module):
         B_idx = torch.arange(B, device=device).unsqueeze(1).expand(B, K)
         sub_boxes_k = boxes_b[B_idx, sub_idx]
         obj_boxes_k = boxes_b[B_idx, obj_idx]
-        v_sub = v_obj[B_idx, sub_idx]
-        v_obj_k = v_obj[B_idx, obj_idx]
+        # cfa 只混未注入类别的特征（类名注入是 PredCls 的信息，混到别的槽位会串类）；
+        # 混完再逐槽加 cls_emb，和原来「先整体注入再 gather」数值等价。
+        v_sub = v_obj_base[B_idx, sub_idx]
+        v_obj_k = v_obj_base[B_idx, obj_idx]
+        if self.training and training and getattr(self, "cfa_prob", 0.0) > 0.0:
+            v_sub, v_obj_k = self._mix_entities(
+                v_sub, v_obj_k, pred_labels.clamp(min=0), (pred_labels >= 0) & valid_mask)
+        if cls_emb is not None:
+            v_sub = v_sub + cls_emb[B_idx, sub_idx]
+            v_obj_k = v_obj_k + cls_emb[B_idx, obj_idx]
         union_boxes_k = union_box(sub_boxes_k, obj_boxes_k)
 
         # contact zone: intersection if overlap else the gap box (RA relsgg.py)
@@ -476,8 +550,12 @@ class YOLOVORelate(nn.Module):
 
         box_tokens = self.box_prompt_encoder.encode_pairs(sub_xy, obj_xy)  # [B,K,4,d]
         padding_mask = ~valid_mask
+        # RA config.box_token_dropout=0.3：按图隐藏 4 个角点 token。
+        bt_drop = None
+        if self.training and training and getattr(self, "box_token_dropout", 0.0) > 0.0:
+            bt_drop = torch.rand(B, device=device) < self.box_token_dropout
         r = self.rel_transformer(pair_feat, F_map, box_tokens=box_tokens,
-                                 pair_padding_mask=padding_mask)
+                                 pair_padding_mask=padding_mask, box_token_drop=bt_drop)
         scene_d = self.rel_transformer.scene_proj(F_map).permute(0, 3, 1, 2).contiguous()
         anchors = torch.stack([sub_boxes_k, obj_boxes_k, union_boxes_k, contact_k], dim=2)
         r = self.deformable_read(r, scene_d, anchors)
@@ -496,6 +574,10 @@ class YOLOVORelate(nn.Module):
                               + g[0] * self.sub_text_proj(v_sub)
                               + g[1] * self.obj_text_proj(v_obj_k))
         q_spa = self.spa_proj(torch.cat([r, geo19], dim=-1))
+        # 学习几何残差（零初始化：旧 ckpt 无此属性时为 no-op）。
+        geo_res = getattr(self, "geo_res_proj", None)
+        if geo_res is not None:
+            q_spa = q_spa + geo_res(geo_d)
         logits = self.vocab_head.score_query_dual(q, q_spa)     # [B,K,V]
 
         out = {"sub_idx": sub_idx, "obj_idx": obj_idx, "valid_mask": valid_mask,
@@ -675,22 +757,27 @@ class YOLOVORelate(nn.Module):
             terms["nce"] = per.mean()
 
             # 2. swap hinge (RA losses.swap_direction_hinge; sym exempt)
+            # 向量化：原逐三元组循环每条要 4~5 次 CUDA 同步（sym[p] / any / nonzero），
+            # 全量训练一个 batch 约 300 条 GT → 上千次同步，GPU 利用率只有三成。
+            # 语义不变：跳过对称谓词与反向也标注的对；正反向槽位都在候选里才计 hinge；
+            # 槽位对 (sub,obj) 唯一（采样器 topk 不重复），argmax 等于原来的「第一个命中」。
             sym = self.onto["sym"] if self.onto else torch.zeros(V, dtype=torch.bool, device=device)
             cos_q = cos_all
-            terms_swap = []
-            gt_sym = {(int(x), int(y), int(z)) for (x, y, z) in gt_list[0]}
             sv, ov, vm = sub_idx[0], obj_idx[0], valid_mask[0]
-            for (s, o, p) in gt_list[0]:
-                if sym[p] or (o, s, p) in gt_sym:
-                    continue
-                kf_m = vm & (sv == s) & (ov == o)
-                kb_m = vm & (sv == o) & (ov == s)
-                if not (bool(kf_m.any()) and bool(kb_m.any())):
-                    continue
-                kf = int(kf_m.nonzero(as_tuple=True)[0][0])
-                kb = int(kb_m.nonzero(as_tuple=True)[0][0])
-                terms_swap.append(F.relu(0.05 + cos_q[kb, p] - cos_q[kf, p]))
-            terms["swap"] = torch.stack(terms_swap).mean() if terms_swap else q.new_zeros(())
+            gs, go, gp = g[:, 0], g[:, 1], g[:, 2]                       # [G]
+            fwd_key = (gs * N + go) * V + gp
+            rev_key = (go * N + gs) * V + gp
+            rev_annotated = (rev_key.unsqueeze(1) == fwd_key.unsqueeze(0)).any(1)
+            keep = ~sym[gp.clamp(0, V - 1)] & ~rev_annotated
+            flat_slots = sv * N + ov                                      # [K]
+            hit_f = (flat_slots.unsqueeze(0) == (gs * N + go).unsqueeze(1)) & vm.unsqueeze(0)
+            hit_b = (flat_slots.unsqueeze(0) == (go * N + gs).unsqueeze(1)) & vm.unsqueeze(0)
+            keep = keep & hit_f.any(1) & hit_b.any(1)
+            kf = hit_f.float().argmax(1)
+            kb = hit_b.float().argmax(1)
+            hinge = F.relu(0.05 + cos_q[kb, gp.clamp(0, V - 1)] - cos_q[kf, gp.clamp(0, V - 1)])
+            n_sw = keep.sum()
+            terms["swap"] = (hinge * keep.to(hinge.dtype)).sum() / n_sw.clamp(min=1).to(hinge.dtype)
 
             # 3. per-cell sigmoid aux (RA lambda_sigmoid=0.25 weighting)
             # RA relsgg.py: 直接 bce_with_logits(lg, tgt, weight=w)，无 sigmoid/logit 往返。
