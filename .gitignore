@@ -256,3 +256,6 @@ tools/relgen/prior_vg.json
 /logs/
 /weights/
 mobileclip_s0.pt
+
+# 400 MB 分卷压缩包，不入库（MobileCLIP s0 权重已在 ultralytics/nn/textencoder/mobileclip/）
+/mobileclip_s0_pt_7z_parts/

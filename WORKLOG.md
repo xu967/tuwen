@@ -1642,3 +1642,127 @@ SGDet 的 pair_acc 不再只对"至少产出一条候选"的图求值。
 - 没有改 `SYMMETRIC_PREDICATES` 之外的对称判定逻辑：该表是按 VG 常见谓词手写的，
   不是从标注统计学出来的。
 - 没有重跑全量 val 做交叉验证。
+
+---
+
+## 更新 2026-11-05 对齐 RelateAnything 源码：补齐三项训练期机制（v8）
+
+### 做了什么
+
+**通读官方源码**（GitHub `Maelic/RelateAnything`，逐个文件抓取）：
+`relsgg/model/{relsgg,vocab_head,sampler,transformer,deformable,geometry,pooling,backbone}.py`、
+`training/{losses,engine,embeddings}.py`、`config.py`、`scoring.py`、部署词表
+`predicate_bank.npz`。我们的 `ra/*.py` 与官方 `transformer.py`/`deformable.py`
+逐行 diff 后只差文件头注释——移植是忠实的。
+
+**对比结论（差距全部在训练目标与接线，不在网络体）**：
+
+1. `q_spa`：官方喂 `geo_encoder` 的 512 维学习几何（relsgg.py:309,359），我们只喂
+   19 维原始几何（head.py:283,504）。
+2. 官方 NCE 正例是**同义词组加权平均**（losses.py:281-283）；我们从未读取自己
+   构造的 `pos_mask`（grep 可证），同义词只被当负例打折。
+3. `neg_lw`：官方由 706k 多标注对拟合，log 偏置范围 `[-13.8, 0]`；我们实测
+   `[-1.34, 0]`、均值 −0.26，几乎等于全局温度微调。
+4. `cfa` 同谓词特征混合（官方 ablation +10.1% tail mR）我们完全没有。
+5. `box_token_dropout=0.3`：transformer 早已实现，head 从未传参（死代码）。
+6. 采样器 rel loss 的负样本权重：官方按类对 PU 率，我们恒 0.3。
+7. `alpha`：官方每次前向由 gate(W) 实时算，gate 拿梯度；我们是 `[V]` 自由参数，
+   旧 ckpt 跑到 [−0.55,1.52] 才需要手写 clamp。
+
+**文本空间实测（v6 best 的 W，2809×512）**：
+`above↔below=0.9604`、`to the left of↔to the right of=0.9819`、
+`in front of↔behind=0.9003`，随机对均值 0.8567。
+cos≥0.90 时词表塌成 83 组；cos≥0.95 时 882 组（val 的 417 个 GT 谓词只剩 163 组），
+75.7% 的 GT 行存在另一个 cos≥0.95 的条目。⇒ 精确字符串匹配的指标系统性偏低。
+
+**代码改动（全部 `getattr` 兜底，旧 ckpt 行为逐位不变）**：
+
+- `head.py`：新增 `cfa_prob=0.5` / `cfa_alpha=1.0` 与 `_mix_partners`/`_mix_entities`
+  （移植 relsgg.py:174-216）。混合发生在**未注入类别**的 `v_obj_base` 上，混完再
+  逐槽加 `cls_emb`；与原来「先整体注入再 gather」数值等价。
+- `head.py`：训练期传 `box_token_drop=torch.rand(B) < 0.3`。
+- `head.py`：新增零初始化 `geo_res_proj`，把 `geo_d` 以残差加进 `q_spa`。
+- `tests/test_glp_field.py`：新增 `test_cfa_geo_residual_and_box_drop`；25/25 通过。
+
+**实验**：v7（`glp_50k_v7_objfix_e14`）在第 3 轮被停掉（epoch 1-2 结果与 ckpt 保留），
+腾出 GPU 起 `glp_50k_v8_cfa_e14`：与 v7 相同的 loss/数据/超参，只多上述三项。
+epochs=14、batch=32、lr0=1e-3、seed=0、`YOLOVO_CACHE=0`，日志 `/tmp/50k_v8.log`。
+
+### 没做什么（含原因）
+
+- **没做同义词组正例**：0.95 阈值下 `above↔below`(0.960)、`left/right`(0.982)
+  仍在同组，直接当正例会教模型把反义当正确答案。必须先做官方那套文本空间蒸馏
+  （antonym repulsion），这是 v9 的前置条件。
+- **没把 `q_spa` 完全改成 `geo_encoder` 输出**：会改 `spa_proj` 形状，v6/v7 ckpt
+  无法加载；用零初始化残差达到同等表达能力且向后兼容。
+- **没拟合 `pos_w/neg_lw/sym`**、没做采样器类对 PU 率、没蒸馏文本塔：都需要先跑
+  离线统计（官方 `training/build_soft_supervision.py` 的口径），留到下一轮。
+- 没改任何超参（epochs/batch/lr/seed 与 v7 相同）。
+
+---
+
+## 更新 2026-11-05 全量语料实验启动（v8 收尾 + glp_full_e4）
+
+### 做了什么
+
+**1. v8 跑完 14/14 轮（`glp_50k_v8_cfa_e14`，9.34 h）**
+
+同轮对齐 v6（ep12，两者都是各自峰值）：
+
+| 指标 | v6 | v8 | Δ |
+|---|---:|---:|---:|
+| pc_R@50 | 0.4247 | 0.3820 | **−4.27pp** |
+| pc_predicate_acc | 0.4019 | 0.3960 | −0.59pp |
+| pc_pair_acc | 0.4960 | 0.4887 | −0.73pp |
+| pc_mR@50_sup_ge20 | 0.3412 | 0.3527 | +1.16pp |
+| pc_pair_existence_AP | 0.5824 | 0.5559 | −2.65pp |
+| pc_F1@50 | 0.1491 | 0.1208 | −2.83pp |
+
+结论：cfa + geo_res + box_token_dropout 三项**整体是负收益**（R@50 −4.3pp，
+超过论文 1.3% 噪声底），只有长尾 mR 小幅 +1.2pp。v8 不作为主线。
+
+**2. 新增数据配置 `RA-4M/data_full_train_monitor_v5.yaml`**
+
+由 `data_full.yaml` 复制、只把 `val` 改成 `full_monitor_v5/images`：
+train 仍是全量 `images/train`（472,344 图 / 472,344 labels），
+val 保持 1,024 图 / 417 谓词，**保证与 v6/v8 的监控口径完全一致**。
+
+**3. 启动全量实验 `glp_full_e4`**
+
+```
+YOLOVO_EPOCHS=4 YOLOVO_NAME=glp_full_e4 YOLOVO_CACHE=0 \
+YOLOVO_RELATE_DATA=RA-4M/data_full_train_monitor_v5.yaml \
+/opt/conda/bin/python train.py > /tmp/full_e4.log 2>&1
+```
+
+- 数据 9.4×（472,344 vs 50,000），其余超参与 v8 完全一致（batch=32、lr0=1e-3、
+  seed=0、imgsz=640、workers=8）
+- 单轮约 7 h → 4 轮约 28 h
+- 代码用当前工作区（含 v8 三项机制），因此**对照是 v8 的 50k 曲线**，单一变量
+
+### 没做什么（含原因）
+
+- **没有回退 v8 三项机制再跑全量**：那样需要重跑一份 50k 基线才能做同码对照，
+  且 v8 与 v6 在 ep1–4 差距 <1.5pp，4 轮内不构成混淆。风险已记录在
+  「已知风险」。
+- **没跑论文的 12 epochs**：单卡 2080 Ti 需 84 h。4 轮 = 37.6 个 50k 轮次的
+  样本量，足以定性判断数据规模收益。
+- **没跑全量 val（24,964 图）**：监控仍用 1,024 图子集，保证与历史曲线可比；
+  最终 best.pt 再单独跑全量 val。
+- **没改任何超参**，也没有 commit。
+
+### 已知风险
+
+- `close_mosaic=10 > epochs=4`，全量 4 轮全程开 mosaic（v8 从第 5 轮起关闭），
+  两边的数据增强强度不同，R@50 对比会偏低估。
+  若 ep4 结果明显低于 v8 同轮，优先怀疑这一项。
+- 4 轮的学习率调度比 v8 的 14 轮衰减更快，同样影响可比性。
+
+**实际启动记录（2026-11-05 11:05 起）**：首次运行要先扫 472,344 个标签建
+`labels/train.cache`，实测约 57–130 it/s，耗时约 60–90 min（一次性，之后的运行
+直接读缓存）。故 ep1 约 19:45、ep2 约 02:50、ep3 约 09:50、ep4 约 16:50（11-06）。
+
+**warmup 占比变化**：`warmup_epochs=3` 按 `nw = warmup_epochs * nb` 计
+（`trainer.py:403`），v8 是 4,686/21,868 = 21%，全量是 44,280/59,040 = 75%，
+即前 3 轮都在爬坡、只有第 4 轮满学习率。换算满学习率下的图片数：
+v8 = 11×50k = 55 万，全量 = 1×472k = 47 万，量级相当；总样本 70 万 vs 189 万。

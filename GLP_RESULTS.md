@@ -91,7 +91,14 @@ V2 ep5 诊断：`w_bg_mean=0.482`，`delta_norm=30.32`。
 - 1 epoch 的旧 V2 数字（`w_bg≈0.796`、FMA=-0.971）是背景桶 LayerNorm bug 下的结果，已作废。
 - 本表是管线验证，不是收敛结果，也不是论文数字。
 
-## 5. 全量 RA-4M × 100 epoch（进行中，2026-11-01 启动）
+## 5. 全量 RA-4M × 100 epoch（2026-11-01 启动，当日放弃；本节为历史记录）
+
+> **状态更新 2026-11-06**：下文的 100 epoch 实验（`glp_full_v1_e100`）启动后未产出任何 epoch 结果即被放弃
+> （`runs/test/glp_full_v1_e100/results.csv` 为空；`logs/full_v2.log` 从未产生）。此后的实验全部在 50k 代理集上进行
+> （v5~v8，见 `WORKLOG.md` 1284 行起）。当前唯一的全量实验是 4 epoch 的 `glp_full_e4`（11-05 启动，epoch 1 后中断）
+> 及其续跑 `glp_full_e4_resume`（11-06 起，val 已换成标签正确的 `full_monitor`），
+> 记录见 `worklog/2026-11-06-2130-glp-audit-resume-full-run.md`。本文件第 1~4 节的 smoke 数字、
+> 「RTX 2080 Ti」机器描述与「23 项单测」均为 11-01 的历史状态（现为 RTX 4080 SUPER、25 项）。
 
 - 数据：`RA-4M/data_full_monitor.yaml`
   - train：472,344 图 / 2,668,852 框 / 4,282,531 关系 / 497 类 / 10,370 谓词
