@@ -221,3 +221,45 @@ py-spy 对全量训练主线程采样（改前）：`_compute_loss` 46%（其中
 
 1. `download.log` 出现 ALL_DONE → `python -m barv.hf_psg --parquet-dir /root/rivermind-data/psg_hf --panoptic-json .../panoptic_train2017.json --panoptic-val-json .../panoptic_val2017.json --out /root/rivermind-data/psg_hf/psg_train_from_hf.json --images-out /root/rivermind-data/psg_hf/images`（CPU，约 30~60 分钟，写出 46k 张 JPEG ≈ 8 GB）。
 2. GLP 全量训练结束后：`barv/prepare.py` 用 `configs/barv_psg_contact.yaml` 重建 cache → 几何 LR 基线 → 视觉 scorer 30 轮 → 按 source（contact_other / contact_unlabeled）分别报 AUROC；与 `runs/barv/pilot_seed42` 对照。
+
+## 更新 2026-11-07 04:00（用户离线后恢复进程：核对训练 / 下载，接上 PSG 转换与训练收尾流水线）
+
+### 做了什么
+
+- 核对进程：训练 `glp_full_e4_resume`（python PID 82761，PGID/SID 82753，setsid 启动、`SigIgn` 含 SIGHUP）一直在跑，无需恢复；03:41 时位于 epoch 3/4 的 21%（3,123/14,760，1.06 it/s，显存 15.4 G），40 s 内进度条前进 41 步。epoch 2 已落盘：`results.csv` 第 2 行 pc_R@50=0.43594（epoch 1 同 val 复评 0.4303），`weights/best.pt` 的 `train_metrics.pc_R@50=0.43594`。
+- PSG 下载 `download.sh` 已于 02:30 结束（`download.log` 末行 ALL_DONE，46/46 片共 22.3 GB，每片 `pq.ParquetFile().metadata` 校验通过）。下载完成后本应触发的转换没有人启动，本次补上。
+- 新建 `/root/rivermind-data/psg_hf/convert.sh`（守护脚本，含 `CONVERT_DONE` 完成标记），03:43 以 `setsid nohup` 启动，03:51 结束（exit=0）。产出：`psg_train_from_hf.json`（80 MB，46,267 条记录 / 46,042 张不同 COCO 图 / 261,666 条关系 / 512,947 个段；`obj_iou_lt_0.99`=0，无 `img_no_panoptic_match`、无未知谓词、无丢失端点；296 张因 <2 个段丢弃）与 `images/`（46,042 张 JPEG，22 GB）。所有记录都来自 COCO train2017，没有 val2017 的图。
+- 解压 `data/coco/annotations/panoptic_val2017.zip` → `data/coco/panoptic_val2017/`（5,000 张 PNG，170 MB）。目的是让 val2017 来源的记录也能找到 mask；转换结果显示 PSG train 不含 val2017 图，这一步事后看不是必需，但无副作用（目录原先为空）。
+- 新建 `tools/post_full_e4.sh`（守护流水线，配置区在文件顶部）：等 PID 82761 退出（校验 `/proc/<pid>/cmdline` 含 `train.py`，防 PID 复用）→ `tools/dump_predcls_ours.py` 对 `best.pt`（±GT 类别）与 `last.pt`（GT 类别）各 dump 一次 → `tools/sgg_protocol_eval.py` 把官方 RA、epoch 1、本次三份放在一张表里（`reports/baseline_cmp/protocol_eval_full_monitor_e4.json`、`post/protocol_eval.txt`）→ `CONVERT_DONE` 为 exit=0 时跑 `python -m barv.prepare --config configs/barv_psg_contact.yaml`。03:51 启动，PGID 316311，日志 `runs/test/glp_full_e4_resume/post/run.log`，结束写 `post/DONE`。dump 步骤任一失败则跳过评测；BARV 步骤只依赖转换标记。
+- 预检：`best.pt` 经 `YOLOVO()` 在 CPU 上加载成功（keys 含 ema/model/relate_info/train_metrics，W 为 10,370×512），说明 `_RelateOnlyEMA` 改动后 best/last 仍是完整推理权重、dump 脚本可直接用；`barv.prepare --limit 300 --cache /tmp/barv_smoke_contact` 在 GPU 上 40 s 跑通（1,290 条查询，正 463 / 负 827，0 张缺图，`wearing` 因负例不足被丢，全量时不会）。resnet18 预训练权重已缓存到 `~/.cache/torch/hub`，流水线里不再需要联网。
+- `progress.md` 新增「正在跑的守护进程」表（PID/PGID、日志、停止命令）。
+
+### 没做什么
+
+- 没有改训练进程的任何状态（没重启、没改 lr/epoch）：它本来就活着。
+- 没有删除 46 片 parquet（22 GB）：转换已完成、JSON + JPEG 已够用，但删源数据要用户拍板。当前数据盘 246 G 用了 217 G（剩 29 G）；后续产物预计 BARV cache ≈ 1.5 GB、dump 文件 < 5 MB、训练权重原地覆盖，29 G 够用。
+- 没有把「几何 LR 基线 / 视觉 scorer 训练 / 按 source 报 AUROC」排进流水线：这些依赖 cache 统计（每个谓词的正负样本量、`contact_other` 占比）才能定配置，等 `barv_prepare.log` 出来后人工跑。
+- 没有自动改写 `reports/baseline_cmp/README.md`：数字由流水线产出，表格由人核对后再写。
+- `logs/` 里 2026-10-31 ~ 11-06 的 100 多个 `error_report_*.txt` 没动（不是本次产生的）；本次预检误触发生成的 `error_report_26.11.07_1.txt` 已删除。
+
+### 待确认
+
+- 是否删除 `/root/rivermind-data/psg_hf/train-000*.parquet`（22 GB）腾空间。
+- `tools/post_full_e4.sh` 的 BARV 步骤 `num_workers=24、prep_batch=24` 直接沿用配置文件；全量 46k 图估计 60~70 分钟，若希望训练一结束就先看 GLP 结果再跑 BARV，可以 `kill -- -316311` 后手动分步跑。
+
+### 验证到哪一步
+
+| 项 | 结果 |
+| --- | --- |
+| `ps -o pid,pgid,sid,stat -p 82761` + `/proc/82761/status` SigIgn | 存活，SID 82753，SIGHUP 被忽略 |
+| `logs/full_e4_resume.log` 40 s 内 mtime/进度变化 | 3,123 → 3,164 步 |
+| `convert.sh`（46 片全量转换） | exit=0，8 分钟，统计见上 |
+| `bash -n tools/post_full_e4.sh` + 等待条件单测（82761 → alive，82758 → gone） | 通过 |
+| `post_full_e4.sh` 守护进程 | PGID 316311 存活，run.log 每 30 分钟打印一次训练进度 |
+| `YOLOVO("runs/test/glp_full_e4_resume/weights/best.pt")` CPU 加载 | 通过，49 s |
+| `python -m barv.prepare --config configs/barv_psg_contact.yaml --limit 300 --cache /tmp/barv_smoke_contact` | rc=0，1,290 条查询 |
+
+### 风险与遗留
+
+- 训练若在 epoch 4 末或终评阶段异常退出，流水线仍会对现有 `best.pt` 做 dump/评测，`run.log` 开头会打印训练日志末 6 行和 `results.csv` 行数，看那里判断是否完整。
+- `post_full_e4.sh` 的 dump 走 `/root/rivermind-data/scratch_audit/runs/dump_tmp`，三次 dump 顺序覆盖同一临时目录，互不影响最终 `.pt`。

@@ -1,6 +1,16 @@
 # 进度（新开对话先读这里）
 
-最后更新：2026-11-07 01:20
+最后更新：2026-11-07 04:00
+
+## 正在跑的守护进程（新会话先核对这里）
+
+| 任务 | 进程 | 日志 / 完成标记 | 停止 |
+|---|---|---|---|
+| `glp_full_e4_resume` 全量训练 epoch 2~4 | python PID 82761，PGID 82753（setsid，忽略 SIGHUP，与 IDE 无关） | `logs/full_e4_resume.log`；`runs/test/glp_full_e4_resume/results.csv` 每 epoch 一行 | `kill -- -82753` |
+| 训练收尾流水线 `tools/post_full_e4.sh`（等训练退出 → best/last PredCls dump → 与官方 RA 同口径评测 → BARV 难负例 cache） | PGID 316311（`runs/test/glp_full_e4_resume/post/run.pid`） | `runs/test/glp_full_e4_resume/post/run.log`；结束写 `post/DONE`（每步退出码） | `kill -- -316311` |
+| PSG parquet → OpenPSG 转换 `/root/rivermind-data/psg_hf/convert.sh` | 已结束（03:43 起，8 分钟） | `/root/rivermind-data/psg_hf/convert.log`；`CONVERT_DONE` = `exit=0` | 无 |
+
+状态快照 2026-11-07 03:50：训练在 epoch 3/4 的 25%，1.06 it/s，显存 15.4 G；epoch 2 的 pc_R@50=0.4359（epoch 1 同 val 复评 0.4303）。预计 epoch 4 结束 + 终评 ≈ 11:00。
 
 ## 已完成的事项
 
@@ -9,7 +19,8 @@
 - 代码与交接文档全面审计（含 BARV）：`worklog/2026-11-06-2130-glp-audit-resume-full-run.md`。训练步速 1.21→0.90 s/it 的几项无数值影响的优化已合入工作树。
 - BARV pilot（`runs/barv/pilot_seed42`）：视觉模型 AUROC 0.996 vs 几何 LR 0.994 vs 单个 IoU 标量 0.9655，标签由几何规则决定，现有分数无法证明视觉证据价值。
 
-- 2026-11-07：代码与文档已提交推送（`2e802bf`、`c198a8c`）。论文基线同口径对比完成：`reports/baseline_cmp/README.md`（官方 RelateAnything 权重 vs 我们，同 val/同词表/同评测）。BARV 源数据（PSG train，HF `JosephZ/psg_train_sg`）正在后台下载到 `/root/rivermind-data/psg_hf/`。
+- 2026-11-07：代码与文档已提交推送（`2e802bf`、`c198a8c`）。论文基线同口径对比完成：`reports/baseline_cmp/README.md`（官方 RelateAnything 权重 vs 我们，同 val/同词表/同评测）。
+- 2026-11-07 03:50：PSG train 源数据到齐并转换完成：46 片 parquet（22 GB）→ `/root/rivermind-data/psg_hf/psg_train_from_hf.json`（46,267 条记录 / 46,042 张 COCO train2017 图 / 261,666 条关系，全部物体与 panoptic 段 IoU≥0.99，0 张未匹配）+ `/root/rivermind-data/psg_hf/images/`（46,042 张 JPEG，22 GB）。`barv.prepare` 用 `configs/barv_psg_contact.yaml` 在前 300 条记录上冒烟通过（1,290 条查询，0 张缺图）。
 
 ## 关键决策
 
@@ -20,9 +31,9 @@
 
 ## 未完成的待办
 
-0. BARV 续做：难负例规则已实现并在第 0 片验证（几何 LR 0.97→0.63，`configs/barv_psg_contact.yaml`）。等 `/root/rivermind-data/psg_hf/download.log` 出现 ALL_DONE → `python -m barv.hf_psg ...`（含 `--images-out`）→ GPU 空出后 `barv/prepare.py` 重建 cache → 几何 LR / 视觉 scorer 对照（步骤见 worklog 11-07 01:20）。
+0. BARV 续做：难负例规则已实现并在第 0 片验证（几何 LR 0.97→0.63，`configs/barv_psg_contact.yaml`）。数据已转换完（见上）。`barv.prepare` 全量重建 cache 已排进 `tools/post_full_e4.sh` 第 4 步（训练退出后自动跑，输出 `data/barv_cache_contact/`、日志 `runs/test/glp_full_e4_resume/post/barv_prepare.log`）。之后待做：几何 LR 基线 → 视觉 scorer 30 轮 → 按 source（contact_other / contact_unlabeled）分别报 AUROC，与 `runs/barv/pilot_seed42` 对照。
 
-1. 等 `glp_full_e4_resume` 跑完：对比 epoch 2~4 的 `pc_R@50 / pc_mR@50_sup_ge20 / pc_pair_acc` 与 v8 同轮（`runs/test/glp_50k_v8_cfa_e14/results.csv`），注意两者词表不同（10,370 vs 2,809），不是单变量对照。
+1. 等 `glp_full_e4_resume` 跑完：`tools/post_full_e4.sh` 会自动产出 `reports/baseline_cmp/ours_full_e4_{best_cls,best_nocls,last_cls}.pt`、`protocol_eval_full_monitor_e4.json`、`post/protocol_eval.txt`；人工要做的是把结果写进 `reports/baseline_cmp/README.md`，并对比 epoch 2~4 的 `pc_R@50 / pc_mR@50_sup_ge20 / pc_pair_acc` 与 v8 同轮（`runs/test/glp_50k_v8_cfa_e14/results.csv`），注意两者词表不同（10,370 vs 2,809），不是单变量对照。
 2. 对 best.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`，`rel.val(protocol="predcls")`）。
 3. 消融 A3：让场头的候选列拿到排序监督（M 路 CE 或 NCE 读 fused），再比较 field/max/raw。
 4. 决定是否提交当前工作树（含 v8 改动 + 本次改动）；`mobileclip_s0_pt_7z_parts/` 应 ignore 或移出。
