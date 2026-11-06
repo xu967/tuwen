@@ -1,6 +1,6 @@
 # 进度（新开对话先读这里）
 
-最后更新：2026-11-06 23:30
+最后更新：2026-11-07 01:00
 
 ## 已完成的事项
 
@@ -8,6 +8,8 @@
 - 全量 RA-4M（472,344 图）4 epoch 实验：`glp_full_e4` 跑完 epoch 1 后中断；2026-11-06 已修好断点续训并以 `glp_full_e4_resume` 续跑 epoch 2~4（val 换成标签正确的 `full_monitor`，原 run 的 val 标签 11% 错位）。日志 `logs/full_e4_resume.log`，结果 `runs/test/glp_full_e4_resume/results.csv`，预计 2026-11-07 10:00 前后结束。
 - 代码与交接文档全面审计（含 BARV）：`worklog/2026-11-06-2130-glp-audit-resume-full-run.md`。训练步速 1.21→0.90 s/it 的几项无数值影响的优化已合入工作树。
 - BARV pilot（`runs/barv/pilot_seed42`）：视觉模型 AUROC 0.996 vs 几何 LR 0.994 vs 单个 IoU 标量 0.9655，标签由几何规则决定，现有分数无法证明视觉证据价值。
+
+- 2026-11-07：代码与文档已提交推送（`2e802bf`、`c198a8c`）。论文基线同口径对比完成：`reports/baseline_cmp/README.md`（官方 RelateAnything 权重 vs 我们，同 val/同词表/同评测）。BARV 源数据（PSG train，HF `JosephZ/psg_train_sg`）正在后台下载到 `/root/rivermind-data/psg_hf/`。
 
 ## 关键决策
 
@@ -17,6 +19,8 @@
 - 一级模型权重已从回收站路径备份到 `weights/primary_dior20_best.pt`；`train.py` 默认路径未改。
 
 ## 未完成的待办
+
+0. BARV 续做（方案见 worklog 11-07 01:00 更新）：等 `/root/rivermind-data/psg_hf/download.log` 出现 ALL_DONE → 写难负例规则 → 重建 cache → 重跑几何 LR / 视觉 scorer。
 
 1. 等 `glp_full_e4_resume` 跑完：对比 epoch 2~4 的 `pc_R@50 / pc_mR@50_sup_ge20 / pc_pair_acc` 与 v8 同轮（`runs/test/glp_50k_v8_cfa_e14/results.csv`），注意两者词表不同（10,370 vs 2,809），不是单变量对照。
 2. 对 best.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`，`rel.val(protocol="predcls")`）。

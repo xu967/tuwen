@@ -168,3 +168,28 @@ py-spy 对全量训练主线程采样（改前）：`_compute_loss` 46%（其中
 - 本次改动的 swap/EMA/field-metrics 等价性在 CPU 单测与 1,024 图冒烟上验证，全量 GPU 上的训练曲线与原 run 的 epoch 2 前 3,000 步数值吻合（0.6012/0.07432/2.173/0.00725 vs 原 0.6013/0.07408/2.17/0.00725），但没有做逐位对比。
 - 原 `glp_full_e4` 目录保留未动（epoch 1 的 best/last/train-checkpoint 与错标 val 的 results.csv）。
 - `scratch_audit/`（仓库外，`/root/rivermind-data/scratch_audit/`）保留了本次所有实验脚本与 py-spy 原始采样，可删。
+
+## 更新 2026-11-07 01:00（提交 GitHub / 论文基线同口径对比 / BARV 续做准备）
+
+### 做了什么
+
+- **提交并推送**：`2e802bf feat(relate)…`、`c198a8c docs…` 已推到 `xu967/tuwen` main（SSH 可用；HTTPS 到 github.com/huggingface.co 被墙，`hf-mirror.com`、pypi 可达；环境变量里的代理 127.0.0.1:7897 没有进程在听）。`mobileclip_s0_pt_7z_parts/` 加入 .gitignore。
+- **论文基线直接对比**（用户要求 2）：把论文发布的 RelateAnything ViT-S/16+ 权重（`assets/relsgg-vits16plus/`，含 DINOv3 backbone）在本机跑起来，与我们的模型在同一 1,024 张 RA-4M val 图、GT 框、同一 10,370 词表、同一评测代码下对比。结果与解读见 `reports/baseline_cmp/README.md`；关键数字：只给框时 R@50 官方 26.6 vs 我们 23.2，mR@50 13.1 vs 1.0；给 GT 类别后我们 R@50 44.8 但 mR@50 仍只有 4.1。
+  - 新增 `tools/sgg_protocol_eval.py`（论文 §5.1 口径：逐图 R@K、按谓词 mR@K、LVIS 式三桶）、`tools/dump_predcls_ours.py`（钩住训练内验证器导出逐图预测，与 results.csv 同口径，校验 pc_R@50 逐位相同）、`tools/run_ra_official_predcls.py`（官方模型推理）。
+  - 官方代码 `git@github.com:Maelic/RelateAnything.git` 克隆到 `/root/rivermind-data/RelateAnything`（SSH 克隆 ~45 分钟）；transformers 4.57.1 装在 `/root/rivermind-data/ra_overlay`（不动 conda 主环境；需 `USE_TF=0`，否则 transformers 会去 import 损坏的 tensorflow）。发布权重是 transformers 5.x 导出的，DINOv3 的 state_dict 多一层 `model.`，脚本里重映射后 0 missing / 0 unexpected / 0 shape mismatch；tokenizer 只有 fast 格式，`PredicateTextStudent._ensure_tokenizer` 在脚本内 patch 成 `CLIPTokenizerFast`（官方 backbone 加载会重新 import transformers，模块级 patch 会丢）。
+  - 验证：text student 对词表已知串的编码与 ckpt 的 W cos=1.0（8/8）；20 图冒烟后跑全量 1,024 图 82 s。
+- **BARV 续做准备**（用户要求 3）：源数据路线已打通：`JosephZ/psg_train_sg`（HF，PSG train 46,563 图，含图像字节 + 物体 id/类别/框 + 关系三元组，22.8 GB/46 片）可从 hf-mirror 下载（~3 MB/s），`/root/rivermind-data/psg_hf/download.sh` 正在后台顺序下载（日志 `download.log`）；第 0 片已核对 schema。COCO panoptic PNG 在本地 `data/coco/panoptic_annotations_trainval2017.zip`。
+
+### 没做什么
+
+- 没有重跑 v6/v8 与官方模型的对比（它们是 2,809 词表）；没有在 VG150/PSG test 上复现论文表 4（本机无这两个 test 集；下载 PSG 后可补 PSG test 的 GT 框协议）。
+- 没有评估官方模型的 SGDet（无检测器对齐）；没有做 `pair_weight=0` 变体。
+- BARV 难负例的构造代码未写、cache 未重建、模型未重训：需要先下完 22.8 GB（约 2~3 h）并等 GPU（全量 GLP 训练到 11-07 10:00 左右）。方案已定（见下）。
+- `tools/run_ra_official_predcls.py` 依赖仓库外的 `/root/rivermind-data/RelateAnything` 与 `ra_overlay`，未纳入仓库（第三方代码 + 164 MB 依赖）。
+
+### BARV 续做方案（待数据下完、GPU 空出后执行）
+
+1. **难负例规则**（`barv/psg.py` 新增 source=`contact_other` / `contact_unlabeled`）：对谓词 p 的候选 (s,o)：类别组合在 RULES[p] 允许集合内；**框接触**（IoU>0 或框间距 ≤ 8 px，替代现有 `gap > 451 px` 的「远离」规则）；(s,o,p) 未标注；优先取 (s,o) 标注了其他谓词 q≠p 的对（`contact_other`，几何与正例同分布且确定有关系），其次取同图未标注的接触对（`contact_unlabeled`，带 PSG 稀疏标注噪声，单独打 source 以便消融）。按类别组合与 IoU 分层配额，使正负在 (IoU, 框间距, 面积比) 上的边缘分布匹配（分层后重算几何 LR 的 AUROC 作为「捷径残留」指标，目标 <0.6）。
+2. **特征层面去捷径**：contact 动作框尺寸不再由 gap 决定（`build_action_boxes` 第 0 个动作改为固定 `0.45·min(side)`），第 4 个 mask 通道改为接触点固定窗口。
+3. 从 HF parquet 重建 `psg_train_val.json`（OpenPSG 格式：image_id、segments（类别/框/与 panoptic PNG 的 seg_id 匹配）、relations），走现有 `barv/prepare.py` 重建 cache；train/dev/test 仍按图划分。
+4. 重跑 geometry-only LR、视觉 scorer（30 轮）、再做 WP3 的 ROI oracle gap；只有视觉对几何的增益稳定（≥+3 AUROC 点且 bootstrap CI 不含 0）才继续 teacher/MVE。
