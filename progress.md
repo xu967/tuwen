@@ -30,15 +30,17 @@ epoch 2 中途快照同口径评测（04:07，`reports/baseline_cmp/README.md` �
 - 需要重训才能体现的 bug（场头在 `field_fuse=max` 下只靠 0.25×sigmoid 拿梯度、rel focal 只训 128 对、cap 对 q_spa 不对称、geo BCE 把反向对标 0 等）**不在实验途中修**，等全量结果出来后分别消融。
 - 工作树里 v8 三项机制（cfa / box_token_dropout / geo_res_proj）保持开启：全量实验是用它们训的，代码必须与结果一起定版。
 - 一级模型权重已从回收站路径备份到 `weights/primary_dior20_best.pt`；`train.py` 默认路径未改。
+- 2026-11-07 04:30 用户定下实验流程：**每个配置先跑 4 轮看效果，效果好再跑 20 轮**。流程、启动命令、过关标准（3 条默认阈值）、20 轮从头起而不是续 4 轮权重的理由，都写在 `README.md`「实验流程」一节。正在跑的 `glp_full_e4_resume` 就是第一个 4 轮短跑，它跑完后按该标准决定是否起 `glp_full_e20`（约 78 h）。
 - 2026-11-07 04:10 用户确认：无用文件可删、数据盘会扩容。已删 46 片 PSG parquet（22 GB，JSON + JPEG 已替代）和 `logs/error_report_*.txt`（112 个旧崩溃报告）。保留未动：`images.tar.gz`（1.7 GB，flickr/nyu 图，来源不明）、`mobileclip_s0_pt_7z_parts/`（400 MB，用户上传的分卷包，`assets/` 下已有解出的 `.pt`）、已结束代理实验的 `runs/test/*/weights/train-checkpoint.pt`（每个 1.1 GB，共约 10 GB，续训状态）。
 
 ## 未完成的待办
 
 0. BARV 续做：难负例规则已实现并在第 0 片验证（几何 LR 0.97→0.63，`configs/barv_psg_contact.yaml`）。数据已转换完（见上）。`barv.prepare` 全量重建 cache 已排进 `tools/post_full_e4.sh` 第 4 步（训练退出后自动跑，输出 `data/barv_cache_contact/`、日志 `runs/test/glp_full_e4_resume/post/barv_prepare.log`）。之后待做：几何 LR 基线 → 视觉 scorer 30 轮 → 按 source（contact_other / contact_unlabeled）分别报 AUROC，与 `runs/barv/pilot_seed42` 对照。
 
-1. 等 `glp_full_e4_resume` 跑完：`tools/post_full_e4.sh` 会自动产出 `reports/baseline_cmp/ours_full_e4_{best_cls,best_nocls,last_cls}.pt`、`protocol_eval_full_monitor_e4.json`、`post/protocol_eval.txt`；人工要做的是把结果写进 `reports/baseline_cmp/README.md`，并对比 epoch 2~4 的 `pc_R@50 / pc_mR@50_sup_ge20 / pc_pair_acc` 与 v8 同轮（`runs/test/glp_50k_v8_cfa_e14/results.csv`），注意两者词表不同（10,370 vs 2,809），不是单变量对照。
+1. 等 `glp_full_e4_resume` 跑完（≈ 11:00）：按 README「过关标准」判断是否起 20 轮 `glp_full_e20`（同配置、从头起、`YOLOVO_EPOCHS=20`，约 78 h；判断依据：epoch 4 的 pc_R@50 是否仍高于 epoch 3，只给框的 R@50 是否继续逼近官方 26.61）。`tools/post_full_e4.sh` 会自动产出 `reports/baseline_cmp/ours_full_e4_{best_cls,best_nocls,last_cls}.pt`、`protocol_eval_full_monitor_e4.json`、`post/protocol_eval.txt`；人工要做的是把结果写进 `reports/baseline_cmp/README.md`，并对比 epoch 2~4 的 `pc_R@50 / pc_mR@50_sup_ge20 / pc_pair_acc` 与 v8 同轮（`runs/test/glp_50k_v8_cfa_e14/results.csv`），注意两者词表不同（10,370 vs 2,809），不是单变量对照。
 2. 对 best.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`，`rel.val(protocol="predcls")`）。
-3. 消融 A3：让场头的候选列拿到排序监督（M 路 CE 或 NCE 读 fused），再比较 field/max/raw。
+3. 消融 A3：让场头的候选列拿到排序监督（M 路 CE 或 NCE 读 fused），再比较 field/max/raw。按 README 流程：每个变体先 4 轮，过关的再 20 轮；GPU 一次只跑一个，排队。
+3b. 把 README 里的「训练 → dump → 评测 → 过关判断」收成一个入口脚本 `tools/run_exp.sh`（配置区在顶部，守护启动，结束写 DONE）。现在 GPU 被全量训练占着没法自测，等 11:00 后再写并用 50k 代理 1 轮冒烟。
 4. 决定是否提交当前工作树（含 v8 改动 + 本次改动）；`mobileclip_s0_pt_7z_parts/` 应 ignore 或移出。
 5. BARV：重建难负例后再决定是否继续。
 6. 重写或标注过期文档：`GLP_INNOVATIONS_IMPLEMENTATION.md`、`新手指南.txt`、`barv/README.md`。

@@ -286,3 +286,36 @@ py-spy 对全量训练主线程采样（改前）：`_compute_loss` 46%（其中
 | dump 内 pc_R@50 vs results.csv | 0.4360 vs 0.43594 |
 | 删除后 `ls /root/rivermind-data/psg_hf/` | 只剩 JSON、images、panoptic、脚本与日志 |
 | 删除后训练进程 | 仍在跑（删除的文件与训练无关） |
+
+## 更新 2026-11-07 04:40（实验流程定稿：先 4 轮，效果好再 20 轮）
+
+### 做了什么
+
+- 用户要求：以后实验先跑短的 4 轮看效果，效果好再跑 20 轮，并写进说明文档。已写入 `README.md` 新节「实验流程：先 4 轮，效果好再 20 轮」：
+  - 两段的时间预算（全量 1 epoch ≈ 3.9 h → 4 轮 16 h、20 轮 78 h；50k 代理 1 epoch ≈ 25 min → 1.7 h / 8.5 h）。
+  - 短跑启动命令（基线环境变量与正在跑的 `glp_full_e4_resume` 一致：`YOLOVO_RELATE_DATA=RA-4M/data_full_monitor.yaml`、`YOLOVO_CACHE=0`、field=glp；`YOLOVO_PRIMARY` 改指仓库内备份 `weights/primary_dior20_best.pt`，与默认回收站路径 md5 相同），pid 用 `bash -c 'echo $$ > pid; exec python train.py'` 记，已在本机验证 pid 文件 = 真实进程、`kill -- -PGID` 能停。
+  - 跑完后的同口径评测命令（`tools/dump_predcls_ours.py` ±GT 类别 + `tools/sgg_protocol_eval.py`，与 `reports/baseline_cmp` 同 val/同词表）。
+  - 「效果好」的默认定义（三条）：① epoch 4 的 pc_R@50 高于 epoch 3（warmup 占 3 轮，第 4 轮还在涨才值得加长）；② 对同轮数参照 pc_R@50 ≥ +0.5 或 pc_mR@50 ≥ +1.0（1,024 图监控集 ±0.3 视为噪声）；③ pc_pair_acc 不低于参照 0.5 以上、只给框的 R@50 不低于参照。
+  - 20 轮从头起、不续 4 轮权重的理由：lr 调度是 3 轮 warmup + 按总轮数线性衰减到 0.01×lr0，4 轮末 lr 已到底，续跑会让 lr 跳回去；省时间的续跑写法（`YOLOVO_RESUME=... YOLOVO_EPOCHS=20`）作为备选并要求在 worklog 注明。
+  - 每次实验必留：`results.csv`、`logs/<name>.log`、`reports/baseline_cmp/<name>.json`、worklog 小节。
+- `progress.md`：关键决策加这条流程；待办 1 改为「`glp_full_e4_resume` 跑完后按过关标准决定是否起 `glp_full_e20`」；待办 3 的消融按新流程排队；新增待办 3b（入口脚本 `tools/run_exp.sh`）。
+
+### 没做什么
+
+- 没有写 `tools/run_exp.sh` 把「训练 → dump → 评测 → 判断」串成一个守护脚本：训练段现在没法自测（GPU 被全量训练占到 ≈ 11:00），未经实跑的训练包装脚本不交付；已列入待办 3b。
+- 没有改 `train.py` 的默认值（`YOLOVO_EPOCHS` 默认 100、默认数据仍是旧词表 proxy50k）：README 的命令显式给全所需变量，改默认值会影响在跑的流程与旧记录的可复现性，留给用户决定。
+- 过关标准的三个阈值（+0.5 / +1.0 / −0.5 点，±0.3 噪声）是按 1,024 图监控集的经验给的默认值，没有用多种子实验估计过真实方差。
+- 没有更新 `新手指南.txt`（已标注过期，待办 6）。
+
+### 待确认
+
+- 三条过关阈值是否接受；是否要求短跑同时在 50k 代理和全量上各跑一次（代理 1.7 h 便宜，但词表不同，不能替代全量）。
+- `glp_full_e4_resume` 跑完后若过关，是否立即起 `glp_full_e20`（占卡 3 天多，期间 BARV 的 GPU 步骤只能排在它之前或之后）。
+
+### 验证到哪一步
+
+| 项 | 结果 |
+| --- | --- |
+| README 启动写法（`setsid nohup bash -c 'echo $$ > pid; exec ...'`）本机测试 | pid 文件与真实进程一致，自成 PGID/SID，`kill -- -PGID` 停止成功 |
+| `weights/primary_dior20_best.pt` 与 train.py 默认路径 md5 | 相同（92d91452…） |
+| lr 调度参数核对（`runs/test/glp_full_e4_resume/args.yaml`） | warmup_epochs 3.0、lrf 0.01、cos_lr false、optimizer auto（关系头实际是 AdamW，见 trainer.build_optimizer） |
