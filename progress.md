@@ -1,6 +1,6 @@
 # 进度（新开对话先读这里）
 
-最后更新：2026-11-07 01:00
+最后更新：2026-11-07 01:20
 
 ## 已完成的事项
 
@@ -20,7 +20,7 @@
 
 ## 未完成的待办
 
-0. BARV 续做（方案见 worklog 11-07 01:00 更新）：等 `/root/rivermind-data/psg_hf/download.log` 出现 ALL_DONE → 写难负例规则 → 重建 cache → 重跑几何 LR / 视觉 scorer。
+0. BARV 续做：难负例规则已实现并在第 0 片验证（几何 LR 0.97→0.63，`configs/barv_psg_contact.yaml`）。等 `/root/rivermind-data/psg_hf/download.log` 出现 ALL_DONE → `python -m barv.hf_psg ...`（含 `--images-out`）→ GPU 空出后 `barv/prepare.py` 重建 cache → 几何 LR / 视觉 scorer 对照（步骤见 worklog 11-07 01:20）。
 
 1. 等 `glp_full_e4_resume` 跑完：对比 epoch 2~4 的 `pc_R@50 / pc_mR@50_sup_ge20 / pc_pair_acc` 与 v8 同轮（`runs/test/glp_50k_v8_cfa_e14/results.csv`），注意两者词表不同（10,370 vs 2,809），不是单变量对照。
 2. 对 best.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`，`rel.val(protocol="predcls")`）。

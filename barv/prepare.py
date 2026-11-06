@@ -120,6 +120,9 @@ class QueryPrepDataset(Dataset):
             max_negs_per_image=int(self.cfg["data"].get("max_negs_per_image", 6)),
             min_instance_px=int(self.cfg["data"].get("min_instance_px", 64)),
             seed=int(self.cfg["seed"]),
+            # 'far' (default, v2 protocol) or 'contact' (hard negatives, see psg.build_image_queries)
+            neg_mode=str(self.cfg["data"].get("neg_mode", "far")),
+            contact_gap_px=float(self.cfg["data"].get("contact_gap_px", 8.0)),
         )
         if not queries:
             return None

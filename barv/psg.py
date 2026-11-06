@@ -257,7 +257,8 @@ def _select_negatives(cands: list[dict], pos_pairs: set, cap_pred: int, rng) -> 
     for c in cands:
         c["same_cat"] = 0 if (c["sub_cat"], c["obj_cat"]) in pos_pairs else 1
         c["jitter"] = rng.random()
-    cands.sort(key=lambda c: (c["same_cat"], c["jitter"]))
+    # other_rel (contact mode only): pairs annotated with another predicate first
+    cands.sort(key=lambda c: (c.get("other_rel", 0), c["same_cat"], c["jitter"]))
     return cands[:cap_pred]
 
 
@@ -273,8 +274,25 @@ def build_image_queries(
     max_negs_per_image: int = 6,
     min_instance_px: int = 64,
     seed: int = 0,
+    neg_mode: str = "far",
+    contact_gap_px: float = 8.0,
 ) -> tuple[list[dict], dict]:
-    """Construct positive / verified-negative queries for one image."""
+    """Construct positive / verified-negative queries for one image.
+
+    ``neg_mode``:
+      ``far``     (v2 protocol, default) negatives are pairs separated by more than the calibrated
+                  mask gap. Geometry alone recovers these labels (test AUROC(IoU) = 0.9655,
+                  worklog 2026-11-06), so a scorer trained on them need not look at pixels.
+      ``contact`` hard negatives: pairs whose masks touch or come within ``contact_gap_px``
+                  (same geometry regime as the positives), category combination inside RULES[p],
+                  and (s, o, p) not annotated. Two sources, kept apart for ablation:
+                  ``contact_other``     (s, o) carries another annotated predicate q != p
+                                        (the pair is certainly related, just not by p);
+                  ``contact_unlabeled`` (s, o) carries no annotation at all (PSG is sparsely
+                                        annotated, so this source has label noise).
+                  Far pairs are no longer used as negatives. The contact action box no longer
+                  scales with the gap (it leaked the label through the crop size).
+    """
     h, w = label.shape
     inst = instance_table(rec, label)
     by_idx = {r["idx"]: r for r in inst}
@@ -329,6 +347,7 @@ def build_image_queries(
         # Candidate verified negatives from geometric rules.
         subs = [r["idx"] for r in inst if r["cat"] in rule.subjects and r["area"] >= min_instance_px]
         objs = [r["idx"] for r in inst if r["cat"] in rule.objects and r["area"] >= min_instance_px]
+        annotated_pairs = {(int(s), int(o)) for s, o, _p in gt}
         cands = []
         for s in subs:
             sa = by_idx[s]["area"]
@@ -341,9 +360,16 @@ def build_image_queries(
                 if st is None:
                     continue
                 gap, overlap, cpt = st
-                if gap > float(neg_gap_px[pname]):
+                if neg_mode == "far":
+                    is_neg, source = gap > float(neg_gap_px[pname]), "geom_far"
+                elif neg_mode == "contact":
+                    is_neg = gap <= float(contact_gap_px)
+                    source = "contact_other" if (s, o) in annotated_pairs else "contact_unlabeled"
+                else:
+                    raise ValueError(f"neg_mode must be 'far' or 'contact', got {neg_mode!r}")
+                if is_neg:
                     cands.append(
-                        dict(pred=pname, pid=pid, psg_pid=off, s=s, o=o, label=0, source="geom_far",
+                        dict(pred=pname, pid=pid, psg_pid=off, s=s, o=o, label=0, source=source,
                              gap=gap, overlap=overlap,
                              contact=((cpt[0] - pgeom["px"]) / pgeom["scale"],
                                       (cpt[1] - pgeom["py"]) / pgeom["scale"]),
@@ -351,6 +377,11 @@ def build_image_queries(
                     )
                 else:
                     unknown += 1
+        if neg_mode == "contact":
+            # prefer pairs that are annotated with another predicate (certainly related)
+            for c in cands:
+                c["other_rel"] = 0 if c["source"] == "contact_other" else 1
+            cands.sort(key=lambda c: c["other_rel"])
         selected.extend(_select_negatives(cands, {(by_idx[s]["cat"], by_idx[o]["cat"]) for s, o in pos_pairs},
                                           max_negs_per_pred_image, rng))
 
@@ -361,7 +392,8 @@ def build_image_queries(
             sb, ob = by_idx[s]["box"], by_idx[o]["box"]
             ub = np.array([min(sb[0], ob[0]), min(sb[1], ob[1]), max(sb[2], ob[2]), max(sb[3], ob[3])],
                           dtype=np.float32)
-            actions = build_action_boxes(sb, ob, q["contact"], q["gap"], w, h)
+            # contact mode: the contact crop must not scale with the gap (crop size leaked the label)
+            actions = build_action_boxes(sb, ob, q["contact"], 0.0 if neg_mode == "contact" else q["gap"], w, h)
             q.update(
                 sub_idx=s, obj_idx=o, sub_seg=by_idx[s]["seg_id"], obj_seg=by_idx[o]["seg_id"],
                 sub_cat=by_idx[s]["cat"], obj_cat=by_idx[o]["cat"],

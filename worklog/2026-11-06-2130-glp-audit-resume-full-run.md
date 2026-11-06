@@ -193,3 +193,31 @@ py-spy 对全量训练主线程采样（改前）：`_compute_loss` 46%（其中
 2. **特征层面去捷径**：contact 动作框尺寸不再由 gap 决定（`build_action_boxes` 第 0 个动作改为固定 `0.45·min(side)`），第 4 个 mask 通道改为接触点固定窗口。
 3. 从 HF parquet 重建 `psg_train_val.json`（OpenPSG 格式：image_id、segments（类别/框/与 panoptic PNG 的 seg_id 匹配）、relations），走现有 `barv/prepare.py` 重建 cache；train/dev/test 仍按图划分。
 4. 重跑 geometry-only LR、视觉 scorer（30 轮）、再做 WP3 的 ROI oracle gap；只有视觉对几何的增益稳定（≥+3 AUROC 点且 bootstrap CI 不含 0）才继续 teacher/MVE。
+
+## 更新 2026-11-07 01:20（BARV 续做：数据路线打通 + 难负例规则实现并验证）
+
+### 做了什么
+
+- `barv/hf_psg.py`（新）：把 HF `JosephZ/psg_train_sg` 的 parquet（PSG train 46,563 图：图像字节 + 物体 `类别.k` 与 xyxy 框 + 关系三元组）还原成 OpenPSG 格式记录。HF 的 `image_id` 是 PSG 内部 id 而非 COCO id，改用「全部物体 (类别, 框) 的集合」作指纹与本地 COCO panoptic 标注（train+val 2017，123,213 图）匹配：第 0 片 1,013 张图全部命中，19,274 个物体与 panoptic 段逐一 IoU=1.0，7,548 条关系全部保留，谓词 0 个未知。输出含 `segments_info(seg_id/category_id/area)`、`annotations(bbox xyxy)`、`relations`，与 `barv/psg.py` 现有消费者兼容。
+- COCO panoptic PNG 已从 `data/coco/annotations/panoptic_train2017.zip` 解到 `data/coco/panoptic_train2017/`（118,287 张）。
+- `barv/psg.py`：`build_image_queries` 新增 `neg_mode="far"|"contact"`（默认 far，旧行为逐位不变）。contact 模式：负例 = 与正例同几何域（mask 接触或间距 ≤ `contact_gap_px`=8 px）、类别组合在 RULES[p] 内、(s,o,p) 未标注；分两种 source：`contact_other`（该对标注了别的谓词，确定有关系）优先，`contact_unlabeled` 其次；contact 动作框不再随 gap 缩放。`barv/prepare.py` 透传 `data.neg_mode / data.contact_gap_px`。新配置 `configs/barv_psg_contact.yaml`。
+- **验证**（第 0 片前 400 张图，真实 panoptic mask，CPU）：
+
+| neg_mode | 查询数（正/负） | AUROC(IoU) | AUROC(−gap) | P(gap=0｜正) / P(gap=0｜负) | 几何 LR 5 折 AUROC |
+|---|---|---:|---:|---|---:|
+| far（现有 pilot 口径） | 656 / 1,578 | 0.963 | 0.983 | 0.887 / 0.000 | 0.970 |
+| contact（新） | 656 / 1,559（other 457 + unlabeled 1,102） | 0.558 | 0.519 | 0.887 / 0.837 | 0.630 |
+
+几何捷径从 0.97 降到 0.63（剩余来自类别组合与面积比），视觉模型必须看像素才能超过 0.63。
+
+### 没做什么
+
+- 没有跑全量转换（46 片还在下载，`/root/rivermind-data/psg_hf/download.log`），没有重建 cache（`prepare.py` 需要 GPU 抽特征；GLP 全量训练占卡到 11-07 10:00 左右），没有重训 scorer。
+- 没有重新校准 `contact_gap_px`（8 px 是按 320 px letterbox 下 mask 相邻判定取的经验值；可用正例 gap 分位数校准）。
+- `contact_unlabeled` 的标注噪声未量化（PSG 稀疏标注），需要 `contact_other` 单独消融。
+- 远离负例被完全弃用：若要保留「远离 = 负」这类易负例以稳定训练，可按比例混入，但须在指标里按 source 分开报。
+
+### 明天执行顺序
+
+1. `download.log` 出现 ALL_DONE → `python -m barv.hf_psg --parquet-dir /root/rivermind-data/psg_hf --panoptic-json .../panoptic_train2017.json --panoptic-val-json .../panoptic_val2017.json --out /root/rivermind-data/psg_hf/psg_train_from_hf.json --images-out /root/rivermind-data/psg_hf/images`（CPU，约 30~60 分钟，写出 46k 张 JPEG ≈ 8 GB）。
+2. GLP 全量训练结束后：`barv/prepare.py` 用 `configs/barv_psg_contact.yaml` 重建 cache → 几何 LR 基线 → 视觉 scorer 30 轮 → 按 source（contact_other / contact_unlabeled）分别报 AUROC；与 `runs/barv/pilot_seed42` 对照。
