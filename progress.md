@@ -12,6 +12,8 @@
 
 状态快照 2026-11-07 03:50：训练在 epoch 3/4 的 25%，1.06 it/s，显存 15.4 G；epoch 2 的 pc_R@50=0.4359（epoch 1 同 val 复评 0.4303）。预计 epoch 4 结束 + 终评 ≈ 11:00。
 
+epoch 2 中途快照同口径评测（04:07，`reports/baseline_cmp/README.md` 已加两行）：框+GT 类别 R@50 45.34 / mR@50 6.63 / pair_acc 54.93（epoch 1：44.81 / 4.07 / 54.27）；只给框 R@50 24.35 / mR@50 1.45 / pair_acc 30.59（epoch 1：23.23 / 1.04 / 29.27；官方 RA：26.61 / 13.11 / 34.26）。头部在涨，尾部谓词仍接近 0。
+
 ## 已完成的事项
 
 - GLP 关系头（RelateAnything 移植 + 谓词高斯场）在 RA-4M 上的 50k 代理实验 v5→v8 全部跑完，结论见 `WORKLOG.md`（1284 行起）：v6 是主线（pc_R@50≈0.42），v8 三项机制整体负收益。
@@ -28,6 +30,7 @@
 - 需要重训才能体现的 bug（场头在 `field_fuse=max` 下只靠 0.25×sigmoid 拿梯度、rel focal 只训 128 对、cap 对 q_spa 不对称、geo BCE 把反向对标 0 等）**不在实验途中修**，等全量结果出来后分别消融。
 - 工作树里 v8 三项机制（cfa / box_token_dropout / geo_res_proj）保持开启：全量实验是用它们训的，代码必须与结果一起定版。
 - 一级模型权重已从回收站路径备份到 `weights/primary_dior20_best.pt`；`train.py` 默认路径未改。
+- 2026-11-07 04:10 用户确认：无用文件可删、数据盘会扩容。已删 46 片 PSG parquet（22 GB，JSON + JPEG 已替代）和 `logs/error_report_*.txt`（112 个旧崩溃报告）。保留未动：`images.tar.gz`（1.7 GB，flickr/nyu 图，来源不明）、`mobileclip_s0_pt_7z_parts/`（400 MB，用户上传的分卷包，`assets/` 下已有解出的 `.pt`）、已结束代理实验的 `runs/test/*/weights/train-checkpoint.pt`（每个 1.1 GB，共约 10 GB，续训状态）。
 
 ## 未完成的待办
 

@@ -263,3 +263,26 @@ py-spy 对全量训练主线程采样（改前）：`_compute_loss` 46%（其中
 
 - 训练若在 epoch 4 末或终评阶段异常退出，流水线仍会对现有 `best.pt` 做 dump/评测，`run.log` 开头会打印训练日志末 6 行和 `results.csv` 行数，看那里判断是否完整。
 - `post_full_e4.sh` 的 dump 走 `/root/rivermind-data/scratch_audit/runs/dump_tmp`，三次 dump 顺序覆盖同一临时目录，互不影响最终 `.pt`。
+
+## 更新 2026-11-07 04:15（epoch 2 中途快照评测 + 清理）
+
+### 做了什么
+
+- 训练进行中对 `runs/test/glp_full_e4_resume/weights/best.pt`（epoch 2，EMA）跑同口径评测（脚本 `/root/rivermind-data/scratch_audit/eval_ep2.sh`，守护方式，与训练并行占卡 5 分钟，显存峰值 19.5 G）：dump 两份 `reports/baseline_cmp/ours_full_ep2_{cls,nocls}.pt`，评测表 `protocol_eval_full_monitor_ep2.json`。dump 内验证器 pc_R@50=0.4360，与 `results.csv` 的 0.43594 一致。
+- 结果已写进 `reports/baseline_cmp/README.md`（两行 + 变化说明）：框+GT 类别 R@50 45.34 / mR@50 6.63 / F1 11.56 / pair_acc 54.93；只给框 R@50 24.35 / mR@50 1.45 / F1 2.74 / pair_acc 30.59。相对 epoch 1：全部指标上升，只有 frequent 桶（5 个谓词）58.1→53.3。相对官方 RA（只给框 26.61 / 13.11 / 17.56 / 34.26）：R@50 差距 3.4→2.3，mR@50 差距基本不变。
+- 用户确认可删无用文件并会扩容数据盘后：删除 `/root/rivermind-data/psg_hf/train-000{00..45}-of-00046.parquet`（22 GB；转换 exit=0、46 片全读、JSON + 46,042 张 JPEG 已落盘）和 `logs/error_report_*.txt`（112 个，692 KB，未跟踪，WORKLOG 多处记为「未清理」）。数据盘 217 G → 196 G 已用（剩 50 G）。
+
+### 没做什么
+
+- 没删 `images.tar.gz`（1.7 GB，内容是 `images/flickr`、`images/nyu`，不知道哪条线在用）、`mobileclip_s0_pt_7z_parts/`（400 MB，用户 11-06 上传的分卷 zip，`assets/mobileclip_extract/mobileclip_s0.pt` 已是解出的权重）、9 个已结束代理实验的 `train-checkpoint.pt`（各 1.1 GB）：前两个来源/用途要用户定，后者是续训状态，盘要扩容就不必冒险。
+- 没有重跑 epoch 2 的全量 val（24,964 图），只用 1,024 张 monitor 子集。
+- 代理实验 v6（pc_R@50 0.4247，`glp_50k_v6_cls_e20`）与全量 epoch 2（0.4359）不能直接比：词表 2,809 vs 10,370、val 标签口径不同。
+
+### 验证到哪一步
+
+| 项 | 结果 |
+| --- | --- |
+| `eval_ep2.sh`（两次 dump + 评测） | 全部 rc=0，04:02→04:07 |
+| dump 内 pc_R@50 vs results.csv | 0.4360 vs 0.43594 |
+| 删除后 `ls /root/rivermind-data/psg_hf/` | 只剩 JSON、images、panoptic、脚本与日志 |
+| 删除后训练进程 | 仍在跑（删除的文件与训练无关） |
