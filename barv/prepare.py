@@ -19,6 +19,9 @@ from .psg import audit_positive_gaps, build_image_queries, load_psg, panoptic_id
 SPLITS = ["train_core", "train_teacher", "dev", "calib", "test", "psgval"]
 SPLIT_CODE = {s: i for i, s in enumerate(SPLITS)}
 CODE_SPLIT = {i: s for s, i in SPLIT_CODE.items()}
+# 查询来源编码（存进 queries.npz 的 source 列）；见 barv/psg.py build_image_queries
+SOURCE_CODE = {"psg_positive": 0, "geom_far": 1, "contact_other": 2, "contact_unlabeled": 3}
+CODE_SOURCE = {v: k for k, v in SOURCE_CODE.items()}
 
 
 def select_records(cfg: dict) -> list[dict]:
@@ -223,7 +226,9 @@ def cache_features(cfg: dict, records: list[dict], thresholds: dict, out_path: s
                         elif k == "label":
                             metas[k].append(q["label"])
                         elif k == "source":
-                            metas[k].append(0 if q["source"] == "psg_positive" else 1)
+                            # 0 正例；负例按来源分开存，run_contact 要按来源分别报 AUROC
+                            # （旧 cache 只有 0/1：1 = geom_far，语义不变）
+                            metas[k].append(SOURCE_CODE.get(q["source"], 1))
                         elif k == "split":
                             metas[k].append(SPLIT_CODE[batch["splits"][b]])
                         elif k == "gap":
@@ -318,6 +323,8 @@ def cache_features(cfg: dict, records: list[dict], thresholds: dict, out_path: s
         "pred_counts": dict(Counter(pred_arr.tolist())),
         "dropped_predicates": dropped,
         "split_counts": {CODE_SPLIT[c]: int((split_codes == c).sum()) for c in np.unique(split_codes)},
+        "source_counts": {CODE_SOURCE.get(int(c), str(int(c))): int((np.asarray(metas["source"]) == c).sum())
+                          for c in np.unique(np.asarray(metas["source"]))},
         "elapsed_sec": round(time.time() - t0, 1),
     }
     save_json(stats, out_path.replace(".npz", "_stats.json"))

@@ -319,3 +319,34 @@ py-spy 对全量训练主线程采样（改前）：`_compute_loss` 46%（其中
 | README 启动写法（`setsid nohup bash -c 'echo $$ > pid; exec ...'`）本机测试 | pid 文件与真实进程一致，自成 PGID/SID，`kill -- -PGID` 停止成功 |
 | `weights/primary_dior20_best.pt` 与 train.py 默认路径 md5 | 相同（92d91452…） |
 | lr 调度参数核对（`runs/test/glp_full_e4_resume/args.yaml`） | warmup_epochs 3.0、lrf 0.01、cos_lr false、optimizer auto（关系头实际是 AdamW，见 trainer.build_optimizer） |
+
+## 更新 2026-11-07 05:30（用户接受过关阈值并要求开跑：过关→20 轮自动化，BARV 对照脚本接入流水线）
+
+### 做了什么
+
+- `tools/post_full_e4.sh` 重写为 v2 并重启（旧守护 PGID 316311 已 `kill -- -316311`；bash 边读边执行，不能原地改运行中的脚本）。新守护 PGID 509167，日志 `runs/test/glp_full_e4_resume/post/run.log`。新增两步：
+  - 第 4 步过关判断（内嵌 python，结果写 `post/gate.json`，退出码 0 过关 / 3 不过关）：c1 `results.csv` 中 epoch 4 的 pc_R@50 > epoch 3；c2 e4 best 只给框 R@50 ≥ 24.35（epoch 2 快照）；c3 e4 best 框+类别 pair_acc ≥ 54.93 − 0.5。过关则以 README 的命令起 `glp_full_e20`（`YOLOVO_EPOCHS=20 YOLOVO_PRIMARY=weights/primary_dior20_best.pt`，同数据、同 field、从头起），pid 写 `logs/glp_full_e20.pid`，90 s 后校验存活。
+  - 第 5 步 BARV：`barv.prepare` 后接 `barv.run_contact`（输出 `runs/barv_contact/seed42/`）。
+- 过关逻辑单测（/tmp 下伪造 results.csv 与评测 json）：上涨+达标 → rc 0；第 4 轮下降 → rc 3；只给框 R@50 低于参照 → rc 3。启动写法单测：`env $E20_ENV setsid nohup bash -c 'echo $$ > pid; exec ...'` 环境变量进入子进程、pid 文件 = 真实进程、`kill -- -PGID` 可停。
+- `barv/prepare.py`：`source` 列由 0/1 改为 0 正例 / 1 geom_far / 2 contact_other / 3 contact_unlabeled（`SOURCE_CODE`），`prepare_report.json` 新增 `source_counts`。旧 cache 语义不变（旧负例全是 geom_far=1）。
+- 新增 `barv/run_contact.py`：同一 train_core（按谓词配平）训练几何 LR、no_visual MLP（像素特征置零）、视觉 scorer 三组，dev 选 epoch，test 报总体 AUROC、按负例来源（正例 vs contact_other、正例 vs contact_unlabeled）AUROC、按谓词 AUROC，写 `report.json` / `report.md`。
+- 冒烟（600 条记录、GPU 与训练并行）：prepare rc=0（2,631 条查询，source_counts = 正 982 / contact_other 475 / contact_unlabeled 1,174），run_contact rc=0，全部产物生成。600 图的数字无统计意义，不写入结论。
+
+### 没做什么
+
+- 没有在 20 轮启动前加「GPU 空闲 / 显存」检查：训练退出后卡一定是空的，BARV 步骤排在它之后且显存小。
+- 没有把 BARV 的 ROI 增益、teacher/value 等后续实验接进来：先看 run_contact 的 test 表，视觉是否超过几何捷径决定要不要继续。
+- `run_contact` 只跑 seed 42 单种子；多种子等全量数字出来再定。
+- 没有改 `configs/barv_psg_contact.yaml` 的训练超参（relation_epochs 30、batch 4096、patience 8，沿用 pilot）。
+
+### 验证到哪一步
+
+| 项 | 结果 |
+| --- | --- |
+| `bash -n tools/post_full_e4.sh` | 通过 |
+| 过关逻辑 3 组用例 | rc 0 / 3 / 3，符合预期 |
+| e20 启动写法（sleep 替身） | pid/PGID/环境变量正确，可停 |
+| 新守护进程 | PGID 509167 存活，run.log 已在轮询训练 |
+| `barv.prepare --limit 600`（改后） | rc=0，source_counts 正确 |
+| `barv.run_contact`（600 条 cache） | rc=0，report.md 生成 |
+| 训练进程 82761 | 未受影响，epoch 3/4 52% |
