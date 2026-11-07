@@ -1,0 +1,192 @@
+{
+  "stats": {
+    "n_queries": 119525,
+    "n_images": 29772,
+    "n_missing_images": 0,
+    "n_unknown_skipped": 1430511,
+    "n_pos": 43858,
+    "n_neg": 75667,
+    "pred_counts": {
+      "0": 22468,
+      "4": 45130,
+      "1": 11425,
+      "2": 5682,
+      "8": 7260,
+      "7": 4020,
+      "5": 9336,
+      "3": 9499,
+      "6": 4705
+    },
+    "dropped_predicates": {},
+    "split_counts": {
+      "train_core": 86108,
+      "train_teacher": 9404,
+      "dev": 9388,
+      "calib": 7347,
+      "test": 7278
+    },
+    "source_counts": {
+      "psg_positive": 43858,
+      "contact_other": 30239,
+      "contact_unlabeled": 45428
+    },
+    "elapsed_sec": 470.9
+  },
+  "thresholds": {
+    "holding": 266.0,
+    "carrying": 48.221360206604004,
+    "wearing": 85.73442077636719,
+    "sitting on": 241.0,
+    "standing on": 570.9907684326172,
+    "riding": 271.5018615722656,
+    "touching": 20.848291873931885,
+    "leaning on": 11.0,
+    "lying on": 10.0
+  },
+  "audit": {
+    "holding": {
+      "n": 435,
+      "p50": 0.0,
+      "p95": 2.8275370597839355,
+      "p99": 79.27831268310547,
+      "max": 208.0,
+      "frac_contact_2px": 0.9448275862068966
+    },
+    "carrying": {
+      "n": 92,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 4.8600640296936035,
+      "max": 33.7770881652832,
+      "frac_contact_2px": 0.9891304347826086
+    },
+    "wearing": {
+      "n": 106,
+      "p50": 0.0,
+      "p95": 1.7071068286895752,
+      "p99": 9.847228050231934,
+      "max": 63.78753662109375,
+      "frac_contact_2px": 0.9622641509433962
+    },
+    "sitting on": {
+      "n": 208,
+      "p50": 0.0,
+      "p95": 16.285404205322266,
+      "p99": 97.24697875976562,
+      "max": 188.0,
+      "frac_contact_2px": 0.9038461538461539
+    },
+    "standing on": {
+      "n": 838,
+      "p50": 0.0,
+      "p95": 28.866504669189453,
+      "p99": 188.50311279296875,
+      "max": 451.99261474609375,
+      "frac_contact_2px": 0.9033412887828163
+    },
+    "riding": {
+      "n": 86,
+      "p50": 0.0,
+      "p95": 46.599159240722656,
+      "p99": 145.72283935546875,
+      "max": 212.4014892578125,
+      "frac_contact_2px": 0.8953488372093024
+    },
+    "touching": {
+      "n": 40,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 7.245973587036133,
+      "max": 11.878633499145508,
+      "frac_contact_2px": 0.975
+    },
+    "leaning on": {
+      "n": 36,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 2.600006103515625,
+      "max": 4.0,
+      "frac_contact_2px": 0.9722222222222222
+    },
+    "lying on": {
+      "n": 62,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max": 0.0,
+      "frac_contact_2px": 1.0
+    },
+    "_audit": {
+      "images_sampled": 2000,
+      "images_skipped_missing": 0,
+      "gaps_note": "gap measured on 320px letterboxed panoptic masks (adjacent-mask d=1 -> 0), converted to original px"
+    },
+    "_thresholds": {
+      "holding": 266.0,
+      "carrying": 48.221360206604004,
+      "wearing": 85.73442077636719,
+      "sitting on": 241.0,
+      "standing on": 570.9907684326172,
+      "riding": 271.5018615722656,
+      "touching": 20.848291873931885,
+      "leaning on": 11.0,
+      "lying on": 10.0
+    },
+    "_notes": {
+      "holding": {
+        "max_positive_gap_px": 208.0,
+        "threshold_px": 266.0,
+        "n_positive_audited": 435,
+        "p99_positive_gap_px": 79.27831268310547
+      },
+      "carrying": {
+        "max_positive_gap_px": 33.7770881652832,
+        "threshold_px": 48.221360206604004,
+        "n_positive_audited": 92,
+        "p99_positive_gap_px": 4.8600640296936035
+      },
+      "wearing": {
+        "max_positive_gap_px": 63.78753662109375,
+        "threshold_px": 85.73442077636719,
+        "n_positive_audited": 106,
+        "p99_positive_gap_px": 9.847228050231934
+      },
+      "sitting on": {
+        "max_positive_gap_px": 188.0,
+        "threshold_px": 241.0,
+        "n_positive_audited": 208,
+        "p99_positive_gap_px": 97.24697875976562
+      },
+      "standing on": {
+        "max_positive_gap_px": 451.99261474609375,
+        "threshold_px": 570.9907684326172,
+        "n_positive_audited": 838,
+        "p99_positive_gap_px": 188.50311279296875
+      },
+      "riding": {
+        "max_positive_gap_px": 212.4014892578125,
+        "threshold_px": 271.5018615722656,
+        "n_positive_audited": 86,
+        "p99_positive_gap_px": 145.72283935546875
+      },
+      "touching": {
+        "max_positive_gap_px": 11.878633499145508,
+        "threshold_px": 20.848291873931885,
+        "n_positive_audited": 40,
+        "p99_positive_gap_px": 7.245973587036133
+      },
+      "leaning on": {
+        "max_positive_gap_px": 4.0,
+        "threshold_px": 11.0,
+        "n_positive_audited": 36,
+        "p99_positive_gap_px": 2.600006103515625
+      },
+      "lying on": {
+        "max_positive_gap_px": 0.0,
+        "threshold_px": 10.0,
+        "n_positive_audited": 62,
+        "p99_positive_gap_px": 0.0
+      }
+    }
+  }
+}
