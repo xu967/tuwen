@@ -1,6 +1,6 @@
 # 进度（新开对话先读这里）
 
-最后更新：2026-11-07 14:40
+最后更新：2026-11-07 15:30
 
 ## 正在跑的守护进程（新会话先核对这里）
 
@@ -30,6 +30,11 @@ pc_R@50 在 epoch 2 见顶（43.59）后每轮下降（41.98 → 41.18）；pc_m
 
 ## 关键决策
 
+- 2026-11-07 15:30 两个想法的调研结论（两份只读调研报告：`worklog/2026-11-07-1520-idea1-dinov3-backbone.md`、`worklog/2026-11-07-1520-idea2-llm-two-stage-distill.md`）：
+  - **换 DINOv3**：值得，排第一。做法是双骨干（YOLO 继续检测，DINOv3 ViT-S/16+ 只给关系头供特征），先冻结。权重离线可得：`assets/relsgg-vits16plus/model.pth` 内含微调后的 DINOv3（28.7M，带 backbone_config，transformers 4.57.1 overlay 有 `DINOv3ViTModel`）；公开预训练版 `timm/vit_small_plus_patch16_dinov3.lvd1689m`（115 MB）经代理可下，facebook 官方仓库 gated。无泄漏（full_monitor 1,024 图全在 val，train∩val=∅）。代价 448 px +57 GFLOPs / 640 px +139 GFLOPs（现系统 57），冻结时显存 +<2 GB。整体换骨干 = 复现 RA，不做；蒸馏回 YOLO 颈部是证明收益之后的部署优化。
+  - **两阶段蒸馏（LLM 在前）**：论文本身就是三条大→小链路（VLM 标语料、dino.txt→9M 文本 student、共标注统计→损失常数），我们只继承了语料。文本侧不用新跑大模型：官方 `text_student.pt` 就是蒸馏好的第一阶段产物，换 W 零结构改动；LLM 只值得用来补 4,505 个 hapax 谓词和反义/对称表（本机无任何 LLM 权重，7B 下载 4–14 h）。视觉侧蒸馏不能注入冻结 DIOR-YOLO P4 里没有的像素语义，先用 <1 GPU 小时的线性探针测天花板再决定；VLM 重标 472k 图是数百 GPU 小时且与 RA-4M 重复，不做。
+  - 执行顺序：B 换 student 文本空间 → E1 冻结 DINOv3 双骨干（用 model.pth 的权重测上限，再用 timm 公开权重出干净版 E1b）→ C 共标注本体 + 同义词组正样本 → C-LLM 长尾本体。A3（在跑）结果作为 D 并入。
+
 - 2026-11-07 14:00 **差距拆解**（`reports/baseline_cmp/README.md`「差距拆解」）：只给框时我们是几何机器（方向类谓词 52% vs 官方 24%），要看像素的谓词全塌（动作 1.3% vs 35%，436 个谓词只命中 27 个）；给 GT 类别后靠类别先验补回。第一位差距是冻结的 YOLO11n-DIOR 颈部特征不带物体/接触语义，不在关系头；第二位是 MobileCLIP 谓词文本空间（中位谓词有 1,441 个 cos≥0.9 的邻居，反义对 cos 0.92，官方 student 0.24）。下一步按影响排序 A 可训练颈部副本 / B 换官方 student 文本空间 / C 同义词组正样本 + 共标注负例折扣 / D 场头候选 CE（A3，在跑）。
 - 2026-11-07 13:50 用户同意 (a)：不以 F1 改判、不起 20 轮；先做 A3 与已知缺陷修复。A3 实现为 `YOLOVO_CAND_CE=<w>`（head `_losses` 的 `cand_ce`：场头重打分的 M=8 候选对 GT 做 CE，τ=0.07；默认 0 不进损失，基线逐位不变）。为省 GPU，A3 在 50k 子集 + 全词表上跑 4 轮（1.7 h/个），与同配置 4 轮基线背靠背比较，而不是全量 16 h。
 
@@ -43,14 +48,16 @@ pc_R@50 在 epoch 2 见顶（43.59）后每轮下降（41.98 → 41.18）；pc_m
 
 ## 未完成的待办
 
-0. 等 A3 队列（≈ 18:30）：看 `runs/test/p50k_candce_e4/post/gate.json`（c2 = pc_R@50 +0.5 或 pc_mR@50 +1.0；c3 pair_acc 不掉 0.5 以上）。过关 → 全量 4 轮 `glp_full_candce_e4`（16 h）；不过关 → A3 结案，写进 worklog。
-1. **待用户拍板**：差距拆解给出的 A（关系分支可训练 YOLO 颈部副本，lr 5e-5）和 B（W 换官方 student 文本空间）要不要做。两者都改变「冻结一级 + MobileCLIP 文本」的前提：A 多一份 2.6M 参数的颈部副本，B 的文本塔不再是 MobileCLIP（但 MobileCLIP 仍做物体类别文本）。建议顺序 B → A（B 零结构改动、1.7 h 出结果）。
-2. C（同义词组正样本 + 共标注 P̂(q|p) 负例折扣）：需要先从训练集统计共标注表（706k 多标注对的做法见论文 §3.3），工作量 1 天。
-3. BARV 下一步（看完 `runs/barv_contact/seed42/report.md` 后）：多种子（3 个）确认视觉 +2.7 AUROC 不是噪声；`contact_unlabeled` 标注噪声单独消融；再决定做不做 ROI 增益 / teacher-value 实验。
-4. 对 best.pt / last.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`），确认 1,024 图上的「头部换尾部」在全量 val 上成立。
-5. `mobileclip_s0_pt_7z_parts/` 应 ignore 或移出。
-6. 重写或标注过期文档：`GLP_INNOVATIONS_IMPLEMENTATION.md`、`新手指南.txt`、`barv/README.md`。
-7. 训练吞吐：全量时 GPU 利用率约 30%、34 img/s（官方 4×A100 约 83 img/s/卡）；数据管线或逐图 Python 循环是瓶颈，值得 profile 一次。
+0. 等 A3 队列（`logs/queue_a3.log` 打印 QUEUE_DONE，预计 ≈ 19:00）：看 `runs/test/p50k_candce_e4/post/gate.json`。过关 → 全量 4 轮 `glp_full_candce_e4`；不过关 → A3 结案写 worklog。
+1. **B**：`wiring.py encode_predicate_bank` 加 `YOLOVO_TEXT_SPACE=student` 开关（10,120 条取官方 bank，250 条用 `text_student.pt` 编码，逻辑照 `tools/run_ra_official_predcls.py`），`ontology.py` 阈值按新空间重定；`run_exp.sh` 跑 `p50k_student_e4`，参照 `p50k_base_e4`。0.5 天 + 1.7 h GPU。
+2. **E1**：`YOLOVO_VIS_BACKBONE=assets/relsgg-vits16plus/model.pth` 双骨干（改动清单见 idea1 报告 §5.2：head.forward 取 `_cur_img` 跑 ViT 得 [B,40,40,384]、`_materialize_pool` 通道改 384、trainer/val 设 `_cur_img`、骨干排除出优化器与 EMA）；跑 `p50k_dinov3frz_e4`。主判据：只给框时 contact/support 与 action/other 组 micro R@50（`tools/gap_analysis.py`）。1 天 + 2–2.5 h GPU。成功后做 E1b（timm 公开权重，后台下载 115 MB）。
+3. 线性探针（可选，<1 h GPU）：10k 图上我们 P4 池化特征 vs 官方池化特征预测物体类别/谓词，差 >30 点则视觉 KD 不做。
+4. **C**：从 `RA-4M/annotations/ra4m_train_coco.json` 统计共标注 P̂(q|p)、同义权重、对称率（移植 `RelateAnything/training/build_soft_supervision.py` 思路），替换 `ontology.py` 四张表，NCE 正样本改同义词组加权均值；同时加同义感知指标，否则精确匹配会把正确改动判死。1 天 CPU + 1.7 h GPU。
+5. BARV 下一步：多种子确认视觉 +2.7 AUROC；`contact_unlabeled` 噪声消融。
+6. 对 best.pt / last.pt 跑全量 val（24,964 图）。
+7. `mobileclip_s0_pt_7z_parts/` 应 ignore 或移出；过期文档标注（`GLP_INNOVATIONS_IMPLEMENTATION.md`、`新手指南.txt`、`barv/README.md`）。
+8. 训练吞吐 profile（GPU 利用率 30%）。
+9. 网络备注：15:00 实测 huggingface.co / github.com 经代理 `127.0.0.1:7897` 可达，hf-mirror 对所有 URL 308 回源；下载 0.3–1.1 MB/s。
 
 ## 环境速查
 
