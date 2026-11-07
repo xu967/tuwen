@@ -29,6 +29,18 @@ Ultralytics 魔改版 YOLOVO（开放词表检测 + MobileCLIP 文本塔）上�
 
 ### 短跑（4 轮）
 
+一条命令跑完整段（训练 → dump → 同口径评测 → 过关判断 → `post/DONE`），配置区在脚本顶部：
+
+```bash
+cd /root/rivermind-data/YOLOVOmodal_3871538535
+NAME=<实验名>_e4 DATA=RA-4M/data_proxy50k.yaml EPOCHS=4 REF_RUN=runs/test/<参照 run> <YOLOVO_* 消融开关> \
+  setsid nohup bash tools/run_exp.sh > logs/<实验名>_e4.queue.log 2>&1 < /dev/null &
+# DATA：消融先用 50k 子集（全词表、同一 val，1.7 h）；过关的再换 RA-4M/data_full_monitor.yaml（16 h）
+# 排队：在一个 bash -c 里顺序调用两次 run_exp.sh（例见 logs/queue_a3.log 第一行）
+```
+
+手动分步（与脚本等价）：
+
 ```bash
 cd /root/rivermind-data/YOLOVOmodal_3871538535
 export PYTHONPATH=/tmp/yolovo-audit-numpy2

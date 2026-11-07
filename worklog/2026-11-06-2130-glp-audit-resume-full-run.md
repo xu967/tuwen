@@ -386,3 +386,31 @@ BARV（`runs/barv_contact/seed42/report.md`，cache 119,525 查询 / 29,772 图�
 | 训练日志 grep NaN/error/traceback | 无 |
 | 补 dump `ours_full_e4_last_nocls.pt` | rc=0，validator pc_R@50 0.2172 |
 | 重出 protocol 表 | 7 行，images=1018，GT=9194 |
+
+## 更新 2026-11-07 14:40（与官方 RelateAnything 的差距拆解；A3 实现并开跑）
+
+### 做了什么
+
+- 新增 `tools/gap_analysis.py`：读同口径 dump，按谓词类型（directional / proximity / contact-support / action）与频次桶算 micro R@50、每个谓词的命中与 GT 对上的 top-1 混淆；并比较两份谓词向量矩阵的几何（我们 best.pt 的 `vocab_head.W` = MobileCLIP-S0；官方 model.pth 的 W = 蒸馏 student，取 10,120 个共有谓词）。结果 `reports/baseline_cmp/gap_analysis.json`，解读写进 `reports/baseline_cmp/README.md`「差距拆解」。
+- 关键数字：只给框时 directional 我们 52.4 vs 官方 23.7，contact/support 9.5 vs 26.4，proximity 4.1 vs 23.7，action 1.3 vs 35.0；命中过的谓词 27 vs 133（/436）。给 GT 类别后 contact 51.6、action 44.4。文本空间：我们词表均值 off-diag cos 0.858、中位谓词 1,441 个 cos≥0.9 邻居、反义对均值 0.917（above/below 0.96，left/right 0.98）；官方 0.142 / 1 / 0.24。官方的 `wearing` GT 对 71% 答 `wearing clothing`（精确匹配计错）。
+- 论文配方核对（§3.3、Tab. 14、§B）：12 epoch × 4 A100（5 h）、backbone 全量微调 lr 5e-5、InfoNCE 正样本 = 同义词组加权均值、负例按共标注 P̂(q|p) 折扣（反义对豁免）、负例 512/anchor、蒸馏 student 文本塔（反义 hinge）。我们：单字符串正样本、全词表负例、折扣只按 MobileCLIP 余弦、backbone 冻结。
+- A3 实现：`head._losses` 新增 `cand_ce`（场头重打分的 M=8 候选 cos 对 GT 做 CE，τ=0.07，GT 不在候选内的条目跳过）；`trainer._compute_loss` 读 `YOLOVO_CAND_CE`（默认 0，不进损失，基线逐位不变）。探针验证：64 图 1 轮训练中 63/64 图该项非零，初值 2.49（ln 8 = 2.08），说明 GT 在候选内初始排名偏后、有梯度可学。
+- 新增 `tools/run_exp.sh`（README 待办 3b）：训练 → dump（±类别）→ 与官方 RA 同口径评测 → 过关判断（c1/c2/c3，参照 run 可选）→ `post/DONE`；64 图 1 轮冒烟通过（train rc=0，gate 逻辑执行）。
+- 14:35 起 A3 队列（PGID 1074560）：`p50k_base_e4` → `p50k_candce_e4`，50k 子集 + 全 10,370 词表 + 同一 1,024 图 val，各 4 轮，预计 18:30 结束。
+
+### 没做什么
+
+- 没按用户原话在全量上跑 A3（16 h）：差距拆解显示关系头之外的两项（backbone 特征、文本空间）影响更大，先用 1.7 h 的代理拿 A3 结论，把全量时段留给 A/B。
+- 没做 A（可训练颈部副本）、B（换 student 文本空间）、C（同义词组 + 共标注折扣）：A/B 改变模型前提，等用户拍板；C 需要先统计共标注表。
+- 谓词类型分组是关键字粗分（`gap_analysis.py` 顶部列表），会有误分；只用于定方向，不作为论文数字。
+- 没有复查官方模型在「同义词组匹配」口径下的数字（论文 A3 的修正口径），所以表里官方数字偏保守。
+
+### 验证到哪一步
+
+| 项 | 结果 |
+| --- | --- |
+| `tools/gap_analysis.py` 五份 dump + 两份 W | 跑通，GT 总数 9,194 与 protocol eval 一致 |
+| `py_compile` head.py / trainer.py | 通过 |
+| `YOLOVO_CAND_CE=0.5` 64 图 1 轮（run_exp.sh 冒烟） | train rc=0，无 Traceback |
+| cand_ce 探针 | 63/64 图非零，均值 2.49 |
+| A3 队列进程 | PGID 1074560，训练子进程同组，`logs/queue_a3.log` 在写 |

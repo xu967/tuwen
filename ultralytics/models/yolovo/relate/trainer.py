@@ -435,7 +435,15 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
         o = rel._forward_pairs(rel._batch_feats[0], boxes_pad, counts, gt_list=gt_list,
                                box_cls=cls_pad)
 
-        sums = {k: None for k in self.LAMBDA_RA}
+        # 消融 A3：YOLOVO_CAND_CE=<权重> 把候选列 M 路 CE 加进损失（head._losses 的 cand_ce）；默认 0 不加。
+        lam = getattr(self, "_lambda", None)
+        if lam is None:
+            import os
+            w_ce = float(os.environ.get("YOLOVO_CAND_CE", "0") or 0)
+            lam = dict(self.LAMBDA_RA, cand_ce=w_ce) if w_ce > 0 else dict(self.LAMBDA_RA)
+            self._lambda = lam
+            LOGGER.info(f"[relate] loss weights: {lam}")
+        sums = {k: None for k in lam}
         n_geo_imgs = 0
         nce_vals = []
         field_diag = {}
@@ -487,8 +495,8 @@ class RelateTrainerMixin(_TypedBase):  # type: ignore[misc,valid-type]
                     self._field_metrics.update(out_i, [gt_list[i]])
                 for k, v in o.get("field_diag", {}).items():
                     field_diag[k] = field_diag.get(k, 0.0) + v[i]  # 张量累加，末尾一次取值
-            for k in self.LAMBDA_RA:
-                v = terms[k] * self.LAMBDA_RA[k]
+            for k in lam:
+                v = terms[k] * lam[k]
                 sums[k] = v if sums[k] is None else sums[k] + v
 
         self._rel_log = {

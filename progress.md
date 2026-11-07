@@ -1,17 +1,14 @@
 # 进度（新开对话先读这里）
 
-最后更新：2026-11-07 13:45
+最后更新：2026-11-07 14:40
 
 ## 正在跑的守护进程（新会话先核对这里）
 
-**当前没有本仓库的进程在跑，GPU 空闲**（13:30 时卡上有一个 1 GB、别的容器的进程 PID 444063，不是本仓库的）。
+| 任务 | 进程 | 日志 / 完成标记 | 停止 |
+|---|---|---|---|
+| **A3 消融队列**：`p50k_base_e4`（基线）→ `p50k_candce_e4`（`YOLOVO_CAND_CE=0.5`），各 4 轮，50k 子集 + 全 10,370 词表 + 同一 1,024 图 val（`RA-4M/data_proxy50k.yaml`），每个跑完自动 dump + 与官方 RA 同口径评测 + 过关判断 | PGID 1074560（`logs/queue_a3.pid`），14:35 起，预计 ≈ 18:30 结束 | `logs/queue_a3.log`（总）、`logs/p50k_*.log`（训练）、`runs/test/p50k_*/post/{gate.json,DONE}`、`reports/baseline_cmp/p50k_*.json`；队列结束打印 `QUEUE_DONE` | `kill -- -1074560` |
 
-| 任务 | 状态 | 产物 |
-|---|---|---|
-| `glp_full_e4_resume` 全量训练 epoch 2~4 | 12:06 正常结束（3 轮 13.5 h） | `runs/test/glp_full_e4_resume/{results.csv,weights/best.pt(=epoch 2),weights/last.pt(=epoch 4)}` |
-| 收尾流水线 `tools/post_full_e4.sh` v2 | 12:25 全部结束，`post/DONE` 各步 rc=0；**过关判断 rc=3 不过关，20 轮未启动** | `post/gate.json`、`post/protocol_eval.txt`、`reports/baseline_cmp/protocol_eval_full_monitor_e4.json` |
-| BARV 难负例 cache + 对照 | 12:25 结束 | `data/barv_cache_contact/`（119,525 查询 / 29,772 图）、`runs/barv_contact/seed42/report.md` |
-| PSG parquet → OpenPSG 转换 | 03:51 结束 | `/root/rivermind-data/psg_hf/{psg_train_from_hf.json,images/}` |
+已结束：`glp_full_e4_resume`（12:06，3 轮 13.5 h）、`tools/post_full_e4.sh`（12:25，过关 rc=3，20 轮未起）、BARV 难负例 prepare + run_contact（12:25）、PSG 转换（03:51）。
 
 ### 4 轮全量结果一句话
 
@@ -33,6 +30,9 @@ pc_R@50 在 epoch 2 见顶（43.59）后每轮下降（41.98 → 41.18）；pc_m
 
 ## 关键决策
 
+- 2026-11-07 14:00 **差距拆解**（`reports/baseline_cmp/README.md`「差距拆解」）：只给框时我们是几何机器（方向类谓词 52% vs 官方 24%），要看像素的谓词全塌（动作 1.3% vs 35%，436 个谓词只命中 27 个）；给 GT 类别后靠类别先验补回。第一位差距是冻结的 YOLO11n-DIOR 颈部特征不带物体/接触语义，不在关系头；第二位是 MobileCLIP 谓词文本空间（中位谓词有 1,441 个 cos≥0.9 的邻居，反义对 cos 0.92，官方 student 0.24）。下一步按影响排序 A 可训练颈部副本 / B 换官方 student 文本空间 / C 同义词组正样本 + 共标注负例折扣 / D 场头候选 CE（A3，在跑）。
+- 2026-11-07 13:50 用户同意 (a)：不以 F1 改判、不起 20 轮；先做 A3 与已知缺陷修复。A3 实现为 `YOLOVO_CAND_CE=<w>`（head `_losses` 的 `cand_ce`：场头重打分的 M=8 候选对 GT 做 CE，τ=0.07；默认 0 不进损失，基线逐位不变）。为省 GPU，A3 在 50k 子集 + 全词表上跑 4 轮（1.7 h/个），与同配置 4 轮基线背靠背比较，而不是全量 16 h。
+
 - 全量实验**不重头跑**，从 epoch 1 断点续跑，保持 lr/warmup 调度连续；只把 val 从错标的 `full_monitor_v5` 换成 `full_monitor`。epoch 1 在正确 val 上的复评：pc_R@50=0.4303（`reports/glp_full_e4_epoch1_predcls_full_monitor.json`）。
 - 需要重训才能体现的 bug（场头在 `field_fuse=max` 下只靠 0.25×sigmoid 拿梯度、rel focal 只训 128 对、cap 对 q_spa 不对称、geo BCE 把反向对标 0 等）**不在实验途中修**，等全量结果出来后分别消融。
 - 工作树里 v8 三项机制（cfa / box_token_dropout / geo_res_proj）保持开启：全量实验是用它们训的，代码必须与结果一起定版。
@@ -43,16 +43,14 @@ pc_R@50 在 epoch 2 见顶（43.59）后每轮下降（41.98 → 41.18）；pc_m
 
 ## 未完成的待办
 
-0. **待用户拍板（GPU 现在空着）**：4 轮短跑按约定的 pc_R@50 判据不过关，20 轮没起。两条路：
-   (a) 维持 pc_R@50 判据 → 不起 20 轮，先做消融 A3（场头监督）/ 修已知训练缺陷，再按流程重跑 4 轮；
-   (b) 改以论文主指标 F1@50 为「还在涨」的判据（4 轮单调上升 11.5→14.3，未饱和）→ 立即起 `glp_full_e20`（README 命令，约 78 h）。
-   建议 (a)：20 轮会把已知缺陷（场头在 `field_fuse=max` 下只靠 0.25×sigmoid 拿梯度、rel focal 只训 128 对等）一起固化 3 天；且 R@50 与 pair_acc 在掉，不是单纯「还没收敛」。
-1. BARV 下一步（看完 `runs/barv_contact/seed42/report.md` 后）：多种子（3 个）确认视觉 +2.7 AUROC 不是噪声；`contact_unlabeled` 标注噪声单独消融；再决定做不做 ROI 增益 / teacher-value 实验。
-2. 对 best.pt / last.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`，`rel.val(protocol="predcls")`），确认 1,024 图上的「头部换尾部」在全量 val 上成立。
-3. 消融 A3：让场头的候选列拿到排序监督（M 路 CE 或 NCE 读 fused），再比较 field/max/raw。按 README 流程：每个变体先 4 轮，过关的再 20 轮；GPU 一次只跑一个，排队。
-3b. 把 README 里的「训练 → dump → 评测 → 过关判断」收成一个入口脚本 `tools/run_exp.sh`（配置区在顶部，守护启动，结束写 DONE）。GPU 已空，可用 50k 代理 1 轮冒烟。
-4. `mobileclip_s0_pt_7z_parts/` 应 ignore 或移出。
-5. 重写或标注过期文档：`GLP_INNOVATIONS_IMPLEMENTATION.md`、`新手指南.txt`、`barv/README.md`。
+0. 等 A3 队列（≈ 18:30）：看 `runs/test/p50k_candce_e4/post/gate.json`（c2 = pc_R@50 +0.5 或 pc_mR@50 +1.0；c3 pair_acc 不掉 0.5 以上）。过关 → 全量 4 轮 `glp_full_candce_e4`（16 h）；不过关 → A3 结案，写进 worklog。
+1. **待用户拍板**：差距拆解给出的 A（关系分支可训练 YOLO 颈部副本，lr 5e-5）和 B（W 换官方 student 文本空间）要不要做。两者都改变「冻结一级 + MobileCLIP 文本」的前提：A 多一份 2.6M 参数的颈部副本，B 的文本塔不再是 MobileCLIP（但 MobileCLIP 仍做物体类别文本）。建议顺序 B → A（B 零结构改动、1.7 h 出结果）。
+2. C（同义词组正样本 + 共标注 P̂(q|p) 负例折扣）：需要先从训练集统计共标注表（706k 多标注对的做法见论文 §3.3），工作量 1 天。
+3. BARV 下一步（看完 `runs/barv_contact/seed42/report.md` 后）：多种子（3 个）确认视觉 +2.7 AUROC 不是噪声；`contact_unlabeled` 标注噪声单独消融；再决定做不做 ROI 增益 / teacher-value 实验。
+4. 对 best.pt / last.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`），确认 1,024 图上的「头部换尾部」在全量 val 上成立。
+5. `mobileclip_s0_pt_7z_parts/` 应 ignore 或移出。
+6. 重写或标注过期文档：`GLP_INNOVATIONS_IMPLEMENTATION.md`、`新手指南.txt`、`barv/README.md`。
+7. 训练吞吐：全量时 GPU 利用率约 30%、34 img/s（官方 4×A100 约 83 img/s/卡）；数据管线或逐图 Python 循环是瓶颈，值得 profile 一次。
 
 ## 环境速查
 

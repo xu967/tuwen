@@ -789,8 +789,22 @@ class YOLOVORelate(nn.Module):
             w = torch.where(tgt > 0, torch.ones_like(tgt), pos_mass / n_neg)
             sig = F.binary_cross_entropy_with_logits(lg, tgt, weight=w, reduction="none")
             terms["sigmoid"] = sig.sum(-1).mean()
+
+            # 3b. 候选列排序监督（消融 A3）：场头重打分后的 M 个候选 cos（训练期 GT 强制入列）
+            # 对 GT 做 M 路 CE，温度同 NCE。此前场头的正样本梯度只有 0.25×sigmoid，候选内排序
+            # 没有直接监督（NCE 读 logits_raw，不经场头）。权重由训练器 LAMBDA_RA["cand_ce"] 给，
+            # 默认 0（不进损失，基线逐位不变）。
+            cand_idx, fcos = out.get("cand_idx"), out.get("field_cos")
+            terms["cand_ce"] = q.new_zeros(())
+            if cand_idx is not None and fcos is not None:
+                cand_g = cand_idx[has_gt]                                   # [Kg, M]
+                pos = cand_g[a_idx] == g_idx.unsqueeze(1)                  # [G, M] GT 列所在位置
+                ok = pos.any(1)                                             # 槽位 GT 数 > M 时可能缺席
+                if ok.any():
+                    logp = F.log_softmax(fcos[has_gt].float()[a_idx[ok]] / 0.07, dim=-1)
+                    terms["cand_ce"] = -(logp * pos[ok].float()).sum(-1).mean()
         else:
-            terms["nce"] = terms["swap"] = terms["sigmoid"] = q.new_zeros(())
+            terms["nce"] = terms["swap"] = terms["sigmoid"] = terms["cand_ce"] = q.new_zeros(())
 
         # 4. object-text alignment (Q2): GT boxes' v_obj vs class-name embeddings
         # RA _object_text_loss: 双投影(sub/obj_text_proj)各 CE 取均值，且除以

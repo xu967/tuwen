@@ -1,0 +1,2224 @@
+{
+ "per_model": {
+  "RA_official": {
+   "by_kind": {
+    "contact/support": {
+     "R@50_micro": 0.2639,
+     "mR@50": 0.1467,
+     "n_gt": 3012,
+     "n_pred": 87
+    },
+    "directional": {
+     "R@50_micro": 0.2367,
+     "mR@50": 0.0892,
+     "n_gt": 3503,
+     "n_pred": 42
+    },
+    "action/other": {
+     "R@50_micro": 0.3495,
+     "mR@50": 0.1589,
+     "n_gt": 1754,
+     "n_pred": 218
+    },
+    "proximity": {
+     "R@50_micro": 0.2368,
+     "mR@50": 0.0674,
+     "n_gt": 925,
+     "n_pred": 89
+    }
+   },
+   "by_freq": {
+    "rare<50": {
+     "R@50_micro": 0.2051,
+     "mR@50": 0.1196,
+     "n_gt": 1814,
+     "n_pred": 411
+    },
+    "common50-500": {
+     "R@50_micro": 0.3498,
+     "mR@50": 0.3469,
+     "n_gt": 3916,
+     "n_pred": 20
+    },
+    "frequent>500": {
+     "R@50_micro": 0.2061,
+     "mR@50": 0.2125,
+     "n_gt": 3464,
+     "n_pred": 5
+    }
+   },
+   "top20": [
+    {
+     "pred": "behind",
+     "n_gt": 784,
+     "R@50": 0.181,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.19
+      ],
+      [
+       "beside",
+       0.08
+      ],
+      [
+       "supporting",
+       0.07
+      ]
+     ]
+    },
+    {
+     "pred": "wearing",
+     "n_gt": 734,
+     "R@50": 0.128,
+     "top1_at_gt_pairs": [
+      [
+       "wearing clothing",
+       0.71
+      ],
+      [
+       "wearing",
+       0.13
+      ],
+      [
+       "carrying person wearing",
+       0.02
+      ]
+     ]
+    },
+    {
+     "pred": "in front of",
+     "n_gt": 721,
+     "R@50": 0.15,
+     "top1_at_gt_pairs": [
+      [
+       "beside",
+       0.16
+      ],
+      [
+       "in front of",
+       0.16
+      ],
+      [
+       "supporting",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "to the right of",
+     "n_gt": 624,
+     "R@50": 0.322,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.33
+      ],
+      [
+       "beside",
+       0.17
+      ],
+      [
+       "supporting",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "to the left of",
+     "n_gt": 601,
+     "R@50": 0.281,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.3
+      ],
+      [
+       "beside",
+       0.17
+      ],
+      [
+       "supporting",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "on",
+     "n_gt": 438,
+     "R@50": 0.103,
+     "top1_at_gt_pairs": [
+      [
+       "worn by",
+       0.15
+      ],
+      [
+       "covering",
+       0.13
+      ],
+      [
+       "resting on",
+       0.11
+      ]
+     ]
+    },
+    {
+     "pred": "resting on",
+     "n_gt": 411,
+     "R@50": 0.443,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.44
+      ],
+      [
+       "resting over",
+       0.16
+      ],
+      [
+       "resting near",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "holding",
+     "n_gt": 327,
+     "R@50": 0.391,
+     "top1_at_gt_pairs": [
+      [
+       "holding",
+       0.39
+      ],
+      [
+       "supporting",
+       0.09
+      ],
+      [
+       "beside",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "beside",
+     "n_gt": 299,
+     "R@50": 0.368,
+     "top1_at_gt_pairs": [
+      [
+       "beside",
+       0.4
+      ],
+      [
+       "supporting",
+       0.05
+      ],
+      [
+       "embracing",
+       0.03
+      ]
+     ]
+    },
+    {
+     "pred": "next to",
+     "n_gt": 270,
+     "R@50": 0.144,
+     "top1_at_gt_pairs": [
+      [
+       "beside",
+       0.2
+      ],
+      [
+       "next to",
+       0.15
+      ],
+      [
+       "supporting",
+       0.13
+      ]
+     ]
+    },
+    {
+     "pred": "above",
+     "n_gt": 263,
+     "R@50": 0.327,
+     "top1_at_gt_pairs": [
+      [
+       "above",
+       0.33
+      ],
+      [
+       "illuminating",
+       0.07
+      ],
+      [
+       "wearing clothing",
+       0.07
+      ]
+     ]
+    },
+    {
+     "pred": "part of",
+     "n_gt": 238,
+     "R@50": 0.782,
+     "top1_at_gt_pairs": [
+      [
+       "part of",
+       0.84
+      ],
+      [
+       "supporting",
+       0.03
+      ],
+      [
+       "containing",
+       0.02
+      ]
+     ]
+    },
+    {
+     "pred": "below",
+     "n_gt": 234,
+     "R@50": 0.436,
+     "top1_at_gt_pairs": [
+      [
+       "below",
+       0.45
+      ],
+      [
+       "supporting",
+       0.12
+      ],
+      [
+       "containing",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "watching",
+     "n_gt": 206,
+     "R@50": 0.136,
+     "top1_at_gt_pairs": [
+      [
+       "watching the",
+       0.37
+      ],
+      [
+       "watching",
+       0.16
+      ],
+      [
+       "beside",
+       0.09
+      ]
+     ]
+    },
+    {
+     "pred": "supporting",
+     "n_gt": 167,
+     "R@50": 0.707,
+     "top1_at_gt_pairs": [
+      [
+       "supporting",
+       0.74
+      ],
+      [
+       "containing",
+       0.04
+      ],
+      [
+       "holding",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "covering",
+     "n_gt": 163,
+     "R@50": 0.693,
+     "top1_at_gt_pairs": [
+      [
+       "covering",
+       0.69
+      ],
+      [
+       "worn by",
+       0.07
+      ],
+      [
+       "covering head of",
+       0.02
+      ]
+     ]
+    },
+    {
+     "pred": "on top of",
+     "n_gt": 148,
+     "R@50": 0.02,
+     "top1_at_gt_pairs": [
+      [
+       "covering",
+       0.2
+      ],
+      [
+       "resting on",
+       0.14
+      ],
+      [
+       "covering head of",
+       0.12
+      ]
+     ]
+    },
+    {
+     "pred": "looking at",
+     "n_gt": 146,
+     "R@50": 0.185,
+     "top1_at_gt_pairs": [
+      [
+       "beside",
+       0.23
+      ],
+      [
+       "looking at",
+       0.18
+      ],
+      [
+       "holding",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "containing",
+     "n_gt": 140,
+     "R@50": 0.714,
+     "top1_at_gt_pairs": [
+      [
+       "containing",
+       0.77
+      ],
+      [
+       "in front of",
+       0.04
+      ],
+      [
+       "resting on",
+       0.03
+      ]
+     ]
+    },
+    {
+     "pred": "sitting on",
+     "n_gt": 115,
+     "R@50": 0.017,
+     "top1_at_gt_pairs": [
+      [
+       "sitting upon",
+       0.3
+      ],
+      [
+       "wearing on",
+       0.12
+      ],
+      [
+       "resting on",
+       0.05
+      ]
+     ]
+    }
+   ],
+   "n_predicates_with_hit": 133
+  },
+  "ours_ep2_nocls": {
+   "by_kind": {
+    "contact/support": {
+     "R@50_micro": 0.095,
+     "mR@50": 0.0148,
+     "n_gt": 3012,
+     "n_pred": 87
+    },
+    "directional": {
+     "R@50_micro": 0.5244,
+     "mR@50": 0.1013,
+     "n_gt": 3503,
+     "n_pred": 42
+    },
+    "action/other": {
+     "R@50_micro": 0.0125,
+     "mR@50": 0.0017,
+     "n_gt": 1754,
+     "n_pred": 218
+    },
+    "proximity": {
+     "R@50_micro": 0.0411,
+     "mR@50": 0.0047,
+     "n_gt": 925,
+     "n_pred": 89
+    }
+   },
+   "by_freq": {
+    "rare<50": {
+     "R@50_micro": 0.0138,
+     "mR@50": 0.0034,
+     "n_gt": 1814,
+     "n_pred": 411
+    },
+    "common50-500": {
+     "R@50_micro": 0.1749,
+     "mR@50": 0.1341,
+     "n_gt": 3916,
+     "n_pred": 20
+    },
+    "frequent>500": {
+     "R@50_micro": 0.4252,
+     "mR@50": 0.4459,
+     "n_gt": 3464,
+     "n_pred": 5
+    }
+   },
+   "top20": [
+    {
+     "pred": "behind",
+     "n_gt": 784,
+     "R@50": 0.355,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.36
+      ],
+      [
+       "to the right of",
+       0.14
+      ],
+      [
+       "resting on",
+       0.11
+      ]
+     ]
+    },
+    {
+     "pred": "wearing",
+     "n_gt": 734,
+     "R@50": 0.001,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.35
+      ],
+      [
+       "carrying",
+       0.2
+      ],
+      [
+       "above",
+       0.11
+      ]
+     ]
+    },
+    {
+     "pred": "in front of",
+     "n_gt": 721,
+     "R@50": 0.426,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.44
+      ],
+      [
+       "to the left of",
+       0.11
+      ],
+      [
+       "to the right of",
+       0.11
+      ]
+     ]
+    },
+    {
+     "pred": "to the right of",
+     "n_gt": 624,
+     "R@50": 0.732,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.78
+      ],
+      [
+       "behind",
+       0.06
+      ],
+      [
+       "in front of",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "to the left of",
+     "n_gt": 601,
+     "R@50": 0.715,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.76
+      ],
+      [
+       "in front of",
+       0.07
+      ],
+      [
+       "resting on",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "on",
+     "n_gt": 438,
+     "R@50": 0.014,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.35
+      ],
+      [
+       "behind",
+       0.18
+      ],
+      [
+       "in front of",
+       0.11
+      ]
+     ]
+    },
+    {
+     "pred": "resting on",
+     "n_gt": 411,
+     "R@50": 0.547,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.55
+      ],
+      [
+       "behind",
+       0.12
+      ],
+      [
+       "above",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "holding",
+     "n_gt": 327,
+     "R@50": 0.073,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.22
+      ],
+      [
+       "behind",
+       0.17
+      ],
+      [
+       "carrying",
+       0.13
+      ]
+     ]
+    },
+    {
+     "pred": "beside",
+     "n_gt": 299,
+     "R@50": 0.043,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.24
+      ],
+      [
+       "to the left of",
+       0.22
+      ],
+      [
+       "in front of",
+       0.14
+      ]
+     ]
+    },
+    {
+     "pred": "next to",
+     "n_gt": 270,
+     "R@50": 0.07,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.22
+      ],
+      [
+       "to the right of",
+       0.2
+      ],
+      [
+       "resting on",
+       0.17
+      ]
+     ]
+    },
+    {
+     "pred": "above",
+     "n_gt": 263,
+     "R@50": 0.627,
+     "top1_at_gt_pairs": [
+      [
+       "above",
+       0.65
+      ],
+      [
+       "behind",
+       0.14
+      ],
+      [
+       "resting on",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "part of",
+     "n_gt": 238,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.31
+      ],
+      [
+       "on top of",
+       0.3
+      ],
+      [
+       "behind",
+       0.19
+      ]
+     ]
+    },
+    {
+     "pred": "below",
+     "n_gt": 234,
+     "R@50": 0.603,
+     "top1_at_gt_pairs": [
+      [
+       "below",
+       0.65
+      ],
+      [
+       "in front of",
+       0.18
+      ],
+      [
+       "resting on",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "watching",
+     "n_gt": 206,
+     "R@50": 0.078,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.24
+      ],
+      [
+       "to the right of",
+       0.19
+      ],
+      [
+       "behind",
+       0.19
+      ]
+     ]
+    },
+    {
+     "pred": "supporting",
+     "n_gt": 167,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.25
+      ],
+      [
+       "in front of",
+       0.21
+      ],
+      [
+       "to the left of",
+       0.16
+      ]
+     ]
+    },
+    {
+     "pred": "covering",
+     "n_gt": 163,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.29
+      ],
+      [
+       "resting on",
+       0.2
+      ],
+      [
+       "in front of",
+       0.17
+      ]
+     ]
+    },
+    {
+     "pred": "on top of",
+     "n_gt": 148,
+     "R@50": 0.378,
+     "top1_at_gt_pairs": [
+      [
+       "on top of",
+       0.38
+      ],
+      [
+       "resting on",
+       0.2
+      ],
+      [
+       "behind",
+       0.19
+      ]
+     ]
+    },
+    {
+     "pred": "looking at",
+     "n_gt": 146,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.27
+      ],
+      [
+       "to the right of",
+       0.25
+      ],
+      [
+       "in front of",
+       0.2
+      ]
+     ]
+    },
+    {
+     "pred": "containing",
+     "n_gt": 140,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.26
+      ],
+      [
+       "in front of",
+       0.2
+      ],
+      [
+       "to the right of",
+       0.14
+      ]
+     ]
+    },
+    {
+     "pred": "sitting on",
+     "n_gt": 115,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.31
+      ],
+      [
+       "in front of",
+       0.23
+      ],
+      [
+       "resting on",
+       0.17
+      ]
+     ]
+    }
+   ],
+   "n_predicates_with_hit": 27
+  },
+  "ours_ep4_nocls": {
+   "by_kind": {
+    "contact/support": {
+     "R@50_micro": 0.0548,
+     "mR@50": 0.0152,
+     "n_gt": 3012,
+     "n_pred": 87
+    },
+    "directional": {
+     "R@50_micro": 0.4936,
+     "mR@50": 0.1133,
+     "n_gt": 3503,
+     "n_pred": 42
+    },
+    "action/other": {
+     "R@50_micro": 0.0405,
+     "mR@50": 0.0035,
+     "n_gt": 1754,
+     "n_pred": 218
+    },
+    "proximity": {
+     "R@50_micro": 0.0346,
+     "mR@50": 0.0079,
+     "n_gt": 925,
+     "n_pred": 89
+    }
+   },
+   "by_freq": {
+    "rare<50": {
+     "R@50_micro": 0.0243,
+     "mR@50": 0.0067,
+     "n_gt": 1814,
+     "n_pred": 411
+    },
+    "common50-500": {
+     "R@50_micro": 0.1517,
+     "mR@50": 0.1368,
+     "n_gt": 3916,
+     "n_pred": 20
+    },
+    "frequent>500": {
+     "R@50_micro": 0.3923,
+     "mR@50": 0.4116,
+     "n_gt": 3464,
+     "n_pred": 5
+    }
+   },
+   "top20": [
+    {
+     "pred": "behind",
+     "n_gt": 784,
+     "R@50": 0.324,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.34
+      ],
+      [
+       "to the right of",
+       0.13
+      ],
+      [
+       "to the left of",
+       0.08
+      ]
+     ]
+    },
+    {
+     "pred": "wearing",
+     "n_gt": 734,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.33
+      ],
+      [
+       "carrying",
+       0.14
+      ],
+      [
+       "above",
+       0.1
+      ]
+     ]
+    },
+    {
+     "pred": "in front of",
+     "n_gt": 721,
+     "R@50": 0.386,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.4
+      ],
+      [
+       "to the right of",
+       0.11
+      ],
+      [
+       "to the left of",
+       0.09
+      ]
+     ]
+    },
+    {
+     "pred": "to the right of",
+     "n_gt": 624,
+     "R@50": 0.715,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.77
+      ],
+      [
+       "in front of",
+       0.04
+      ],
+      [
+       "watching",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "to the left of",
+     "n_gt": 601,
+     "R@50": 0.634,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.68
+      ],
+      [
+       "in front of",
+       0.05
+      ],
+      [
+       "watching",
+       0.03
+      ]
+     ]
+    },
+    {
+     "pred": "on",
+     "n_gt": 438,
+     "R@50": 0.016,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.21
+      ],
+      [
+       "resting on",
+       0.19
+      ],
+      [
+       "on top of",
+       0.09
+      ]
+     ]
+    },
+    {
+     "pred": "resting on",
+     "n_gt": 411,
+     "R@50": 0.217,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.22
+      ],
+      [
+       "resting in",
+       0.17
+      ],
+      [
+       "resting against",
+       0.16
+      ]
+     ]
+    },
+    {
+     "pred": "holding",
+     "n_gt": 327,
+     "R@50": 0.083,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.2
+      ],
+      [
+       "behind",
+       0.12
+      ],
+      [
+       "carrying",
+       0.11
+      ]
+     ]
+    },
+    {
+     "pred": "beside",
+     "n_gt": 299,
+     "R@50": 0.037,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.24
+      ],
+      [
+       "to the left of",
+       0.2
+      ],
+      [
+       "behind",
+       0.12
+      ]
+     ]
+    },
+    {
+     "pred": "next to",
+     "n_gt": 270,
+     "R@50": 0.037,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.19
+      ],
+      [
+       "to the left of",
+       0.18
+      ],
+      [
+       "in front of",
+       0.12
+      ]
+     ]
+    },
+    {
+     "pred": "above",
+     "n_gt": 263,
+     "R@50": 0.608,
+     "top1_at_gt_pairs": [
+      [
+       "above",
+       0.63
+      ],
+      [
+       "behind",
+       0.1
+      ],
+      [
+       "on top of",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "part of",
+     "n_gt": 238,
+     "R@50": 0.013,
+     "top1_at_gt_pairs": [
+      [
+       "on top of",
+       0.34
+      ],
+      [
+       "behind",
+       0.21
+      ],
+      [
+       "resting on",
+       0.18
+      ]
+     ]
+    },
+    {
+     "pred": "below",
+     "n_gt": 234,
+     "R@50": 0.59,
+     "top1_at_gt_pairs": [
+      [
+       "below",
+       0.64
+      ],
+      [
+       "in front of",
+       0.15
+      ],
+      [
+       "resting on",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "watching",
+     "n_gt": 206,
+     "R@50": 0.223,
+     "top1_at_gt_pairs": [
+      [
+       "watching",
+       0.25
+      ],
+      [
+       "to the left of",
+       0.17
+      ],
+      [
+       "to the right of",
+       0.17
+      ]
+     ]
+    },
+    {
+     "pred": "supporting",
+     "n_gt": 167,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.16
+      ],
+      [
+       "in front of",
+       0.16
+      ],
+      [
+       "resting on",
+       0.14
+      ]
+     ]
+    },
+    {
+     "pred": "covering",
+     "n_gt": 163,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.3
+      ],
+      [
+       "on top of",
+       0.23
+      ],
+      [
+       "in front of",
+       0.13
+      ]
+     ]
+    },
+    {
+     "pred": "on top of",
+     "n_gt": 148,
+     "R@50": 0.446,
+     "top1_at_gt_pairs": [
+      [
+       "on top of",
+       0.45
+      ],
+      [
+       "behind",
+       0.13
+      ],
+      [
+       "above",
+       0.09
+      ]
+     ]
+    },
+    {
+     "pred": "looking at",
+     "n_gt": 146,
+     "R@50": 0.0,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.24
+      ],
+      [
+       "to the left of",
+       0.22
+      ],
+      [
+       "in front of",
+       0.16
+      ]
+     ]
+    },
+    {
+     "pred": "containing",
+     "n_gt": 140,
+     "R@50": 0.007,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.19
+      ],
+      [
+       "resting against",
+       0.13
+      ],
+      [
+       "to the right of",
+       0.12
+      ]
+     ]
+    },
+    {
+     "pred": "sitting on",
+     "n_gt": 115,
+     "R@50": 0.009,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.25
+      ],
+      [
+       "in front of",
+       0.17
+      ],
+      [
+       "to the right of",
+       0.1
+      ]
+     ]
+    }
+   ],
+   "n_predicates_with_hit": 34
+  },
+  "ours_ep2_cls": {
+   "by_kind": {
+    "contact/support": {
+     "R@50_micro": 0.5156,
+     "mR@50": 0.0951,
+     "n_gt": 3012,
+     "n_pred": 87
+    },
+    "directional": {
+     "R@50_micro": 0.443,
+     "mR@50": 0.1112,
+     "n_gt": 3503,
+     "n_pred": 42
+    },
+    "action/other": {
+     "R@50_micro": 0.4436,
+     "mR@50": 0.0645,
+     "n_gt": 1754,
+     "n_pred": 218
+    },
+    "proximity": {
+     "R@50_micro": 0.1362,
+     "mR@50": 0.0213,
+     "n_gt": 925,
+     "n_pred": 89
+    }
+   },
+   "by_freq": {
+    "rare<50": {
+     "R@50_micro": 0.1626,
+     "mR@50": 0.0384,
+     "n_gt": 1814,
+     "n_pred": 411
+    },
+    "common50-500": {
+     "R@50_micro": 0.4796,
+     "mR@50": 0.5229,
+     "n_gt": 3916,
+     "n_pred": 20
+    },
+    "frequent>500": {
+     "R@50_micro": 0.53,
+     "mR@50": 0.5326,
+     "n_gt": 3464,
+     "n_pred": 5
+    }
+   },
+   "top20": [
+    {
+     "pred": "behind",
+     "n_gt": 784,
+     "R@50": 0.342,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.35
+      ],
+      [
+       "watching",
+       0.1
+      ],
+      [
+       "holding",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "wearing",
+     "n_gt": 734,
+     "R@50": 0.82,
+     "top1_at_gt_pairs": [
+      [
+       "wearing",
+       0.82
+      ],
+      [
+       "in front of",
+       0.03
+      ],
+      [
+       "carrying",
+       0.03
+      ]
+     ]
+    },
+    {
+     "pred": "in front of",
+     "n_gt": 721,
+     "R@50": 0.426,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.44
+      ],
+      [
+       "wearing",
+       0.06
+      ],
+      [
+       "watching",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "to the right of",
+     "n_gt": 624,
+     "R@50": 0.561,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.58
+      ],
+      [
+       "watching",
+       0.05
+      ],
+      [
+       "in front of",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "to the left of",
+     "n_gt": 601,
+     "R@50": 0.514,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.53
+      ],
+      [
+       "in front of",
+       0.06
+      ],
+      [
+       "watching",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "on",
+     "n_gt": 438,
+     "R@50": 0.342,
+     "top1_at_gt_pairs": [
+      [
+       "on",
+       0.34
+      ],
+      [
+       "resting on",
+       0.14
+      ],
+      [
+       "worn by",
+       0.12
+      ]
+     ]
+    },
+    {
+     "pred": "resting on",
+     "n_gt": 411,
+     "R@50": 0.727,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.73
+      ],
+      [
+       "on",
+       0.04
+      ],
+      [
+       "in front of",
+       0.03
+      ]
+     ]
+    },
+    {
+     "pred": "holding",
+     "n_gt": 327,
+     "R@50": 0.388,
+     "top1_at_gt_pairs": [
+      [
+       "holding",
+       0.39
+      ],
+      [
+       "wearing",
+       0.08
+      ],
+      [
+       "playing",
+       0.07
+      ]
+     ]
+    },
+    {
+     "pred": "beside",
+     "n_gt": 299,
+     "R@50": 0.043,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.14
+      ],
+      [
+       "to the left of",
+       0.11
+      ],
+      [
+       "to the right of",
+       0.1
+      ]
+     ]
+    },
+    {
+     "pred": "next to",
+     "n_gt": 270,
+     "R@50": 0.23,
+     "top1_at_gt_pairs": [
+      [
+       "next to",
+       0.24
+      ],
+      [
+       "to the right of",
+       0.1
+      ],
+      [
+       "resting on",
+       0.09
+      ]
+     ]
+    },
+    {
+     "pred": "above",
+     "n_gt": 263,
+     "R@50": 0.418,
+     "top1_at_gt_pairs": [
+      [
+       "above",
+       0.42
+      ],
+      [
+       "wearing",
+       0.09
+      ],
+      [
+       "illuminating",
+       0.08
+      ]
+     ]
+    },
+    {
+     "pred": "part of",
+     "n_gt": 238,
+     "R@50": 0.857,
+     "top1_at_gt_pairs": [
+      [
+       "part of",
+       0.87
+      ],
+      [
+       "resting on",
+       0.02
+      ],
+      [
+       "attached to",
+       0.01
+      ]
+     ]
+    },
+    {
+     "pred": "below",
+     "n_gt": 234,
+     "R@50": 0.573,
+     "top1_at_gt_pairs": [
+      [
+       "below",
+       0.58
+      ],
+      [
+       "in front of",
+       0.1
+      ],
+      [
+       "containing",
+       0.03
+      ]
+     ]
+    },
+    {
+     "pred": "watching",
+     "n_gt": 206,
+     "R@50": 0.689,
+     "top1_at_gt_pairs": [
+      [
+       "watching",
+       0.73
+      ],
+      [
+       "in front of",
+       0.05
+      ],
+      [
+       "to the left of",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "supporting",
+     "n_gt": 167,
+     "R@50": 0.431,
+     "top1_at_gt_pairs": [
+      [
+       "supporting",
+       0.49
+      ],
+      [
+       "behind",
+       0.1
+      ],
+      [
+       "in front of",
+       0.07
+      ]
+     ]
+    },
+    {
+     "pred": "covering",
+     "n_gt": 163,
+     "R@50": 0.423,
+     "top1_at_gt_pairs": [
+      [
+       "covering",
+       0.42
+      ],
+      [
+       "on",
+       0.15
+      ],
+      [
+       "on top of",
+       0.15
+      ]
+     ]
+    },
+    {
+     "pred": "on top of",
+     "n_gt": 148,
+     "R@50": 0.419,
+     "top1_at_gt_pairs": [
+      [
+       "on top of",
+       0.42
+      ],
+      [
+       "resting on",
+       0.21
+      ],
+      [
+       "riding",
+       0.14
+      ]
+     ]
+    },
+    {
+     "pred": "looking at",
+     "n_gt": 146,
+     "R@50": 0.205,
+     "top1_at_gt_pairs": [
+      [
+       "watching",
+       0.21
+      ],
+      [
+       "looking at",
+       0.21
+      ],
+      [
+       "in front of",
+       0.09
+      ]
+     ]
+    },
+    {
+     "pred": "containing",
+     "n_gt": 140,
+     "R@50": 0.536,
+     "top1_at_gt_pairs": [
+      [
+       "containing",
+       0.58
+      ],
+      [
+       "in front of",
+       0.07
+      ],
+      [
+       "resting on",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "sitting on",
+     "n_gt": 115,
+     "R@50": 0.704,
+     "top1_at_gt_pairs": [
+      [
+       "sitting on",
+       0.7
+      ],
+      [
+       "resting on",
+       0.08
+      ],
+      [
+       "riding",
+       0.04
+      ]
+     ]
+    }
+   ],
+   "n_predicates_with_hit": 67
+  },
+  "ours_ep4_cls": {
+   "by_kind": {
+    "contact/support": {
+     "R@50_micro": 0.4608,
+     "mR@50": 0.1192,
+     "n_gt": 3012,
+     "n_pred": 87
+    },
+    "directional": {
+     "R@50_micro": 0.4202,
+     "mR@50": 0.1401,
+     "n_gt": 3503,
+     "n_pred": 42
+    },
+    "action/other": {
+     "R@50_micro": 0.4504,
+     "mR@50": 0.0851,
+     "n_gt": 1754,
+     "n_pred": 218
+    },
+    "proximity": {
+     "R@50_micro": 0.147,
+     "mR@50": 0.0322,
+     "n_gt": 925,
+     "n_pred": 89
+    }
+   },
+   "by_freq": {
+    "rare<50": {
+     "R@50_micro": 0.2161,
+     "mR@50": 0.0621,
+     "n_gt": 1814,
+     "n_pred": 411
+    },
+    "common50-500": {
+     "R@50_micro": 0.4216,
+     "mR@50": 0.4811,
+     "n_gt": 3916,
+     "n_pred": 20
+    },
+    "frequent>500": {
+     "R@50_micro": 0.5032,
+     "mR@50": 0.5059,
+     "n_gt": 3464,
+     "n_pred": 5
+    }
+   },
+   "top20": [
+    {
+     "pred": "behind",
+     "n_gt": 784,
+     "R@50": 0.319,
+     "top1_at_gt_pairs": [
+      [
+       "behind",
+       0.33
+      ],
+      [
+       "watching",
+       0.09
+      ],
+      [
+       "to the right of",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "wearing",
+     "n_gt": 734,
+     "R@50": 0.802,
+     "top1_at_gt_pairs": [
+      [
+       "wearing",
+       0.8
+      ],
+      [
+       "carrying",
+       0.03
+      ],
+      [
+       "in front of",
+       0.03
+      ]
+     ]
+    },
+    {
+     "pred": "in front of",
+     "n_gt": 721,
+     "R@50": 0.377,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.39
+      ],
+      [
+       "watching",
+       0.05
+      ],
+      [
+       "wearing",
+       0.05
+      ]
+     ]
+    },
+    {
+     "pred": "to the right of",
+     "n_gt": 624,
+     "R@50": 0.543,
+     "top1_at_gt_pairs": [
+      [
+       "to the right of",
+       0.58
+      ],
+      [
+       "watching",
+       0.05
+      ],
+      [
+       "in front of",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "to the left of",
+     "n_gt": 601,
+     "R@50": 0.488,
+     "top1_at_gt_pairs": [
+      [
+       "to the left of",
+       0.51
+      ],
+      [
+       "in front of",
+       0.05
+      ],
+      [
+       "watching",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "on",
+     "n_gt": 438,
+     "R@50": 0.226,
+     "top1_at_gt_pairs": [
+      [
+       "on",
+       0.23
+      ],
+      [
+       "worn by",
+       0.19
+      ],
+      [
+       "resting on",
+       0.1
+      ]
+     ]
+    },
+    {
+     "pred": "resting on",
+     "n_gt": 411,
+     "R@50": 0.567,
+     "top1_at_gt_pairs": [
+      [
+       "resting on",
+       0.57
+      ],
+      [
+       "resting in",
+       0.12
+      ],
+      [
+       "on top of",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "holding",
+     "n_gt": 327,
+     "R@50": 0.318,
+     "top1_at_gt_pairs": [
+      [
+       "holding",
+       0.32
+      ],
+      [
+       "playing",
+       0.07
+      ],
+      [
+       "riding",
+       0.06
+      ]
+     ]
+    },
+    {
+     "pred": "beside",
+     "n_gt": 299,
+     "R@50": 0.054,
+     "top1_at_gt_pairs": [
+      [
+       "in front of",
+       0.1
+      ],
+      [
+       "to the right of",
+       0.09
+      ],
+      [
+       "to the left of",
+       0.09
+      ]
+     ]
+    },
+    {
+     "pred": "next to",
+     "n_gt": 270,
+     "R@50": 0.193,
+     "top1_at_gt_pairs": [
+      [
+       "next to",
+       0.2
+      ],
+      [
+       "to the right of",
+       0.1
+      ],
+      [
+       "to the left of",
+       0.08
+      ]
+     ]
+    },
+    {
+     "pred": "above",
+     "n_gt": 263,
+     "R@50": 0.392,
+     "top1_at_gt_pairs": [
+      [
+       "above",
+       0.39
+      ],
+      [
+       "illuminating",
+       0.08
+      ],
+      [
+       "wearing",
+       0.08
+      ]
+     ]
+    },
+    {
+     "pred": "part of",
+     "n_gt": 238,
+     "R@50": 0.832,
+     "top1_at_gt_pairs": [
+      [
+       "part of",
+       0.84
+      ],
+      [
+       "attached to",
+       0.03
+      ],
+      [
+       "inside",
+       0.02
+      ]
+     ]
+    },
+    {
+     "pred": "below",
+     "n_gt": 234,
+     "R@50": 0.564,
+     "top1_at_gt_pairs": [
+      [
+       "below",
+       0.57
+      ],
+      [
+       "in front of",
+       0.06
+      ],
+      [
+       "containing",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "watching",
+     "n_gt": 206,
+     "R@50": 0.621,
+     "top1_at_gt_pairs": [
+      [
+       "watching",
+       0.66
+      ],
+      [
+       "to the left of",
+       0.04
+      ],
+      [
+       "walking past",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "supporting",
+     "n_gt": 167,
+     "R@50": 0.395,
+     "top1_at_gt_pairs": [
+      [
+       "supporting",
+       0.46
+      ],
+      [
+       "in front of",
+       0.08
+      ],
+      [
+       "behind",
+       0.07
+      ]
+     ]
+    },
+    {
+     "pred": "covering",
+     "n_gt": 163,
+     "R@50": 0.442,
+     "top1_at_gt_pairs": [
+      [
+       "covering",
+       0.44
+      ],
+      [
+       "on top of",
+       0.13
+      ],
+      [
+       "on",
+       0.1
+      ]
+     ]
+    },
+    {
+     "pred": "on top of",
+     "n_gt": 148,
+     "R@50": 0.412,
+     "top1_at_gt_pairs": [
+      [
+       "on top of",
+       0.41
+      ],
+      [
+       "riding",
+       0.14
+      ],
+      [
+       "resting on",
+       0.12
+      ]
+     ]
+    },
+    {
+     "pred": "looking at",
+     "n_gt": 146,
+     "R@50": 0.116,
+     "top1_at_gt_pairs": [
+      [
+       "watching",
+       0.25
+      ],
+      [
+       "talking to",
+       0.14
+      ],
+      [
+       "looking at",
+       0.13
+      ]
+     ]
+    },
+    {
+     "pred": "containing",
+     "n_gt": 140,
+     "R@50": 0.636,
+     "top1_at_gt_pairs": [
+      [
+       "containing",
+       0.69
+      ],
+      [
+       "in front of",
+       0.05
+      ],
+      [
+       "behind",
+       0.04
+      ]
+     ]
+    },
+    {
+     "pred": "sitting on",
+     "n_gt": 115,
+     "R@50": 0.183,
+     "top1_at_gt_pairs": [
+      [
+       "sitting in",
+       0.5
+      ],
+      [
+       "sitting on",
+       0.18
+      ],
+      [
+       "resting on",
+       0.04
+      ]
+     ]
+    }
+   ],
+   "n_predicates_with_hit": 87
+  }
+ },
+ "kind_counts": {
+  "action/other": 4765,
+  "directional": 835,
+  "contact/support": 1898,
+  "proximity": 2872
+ },
+ "text_space_ours": {
+  "tag": "ours(MobileCLIP-S0)",
+  "V": 10370,
+  "mean_offdiag_cos": 0.858,
+  "median_neighbours_cos_ge_0.90": 1441.0,
+  "eff_dim": 37.2,
+  "antonym_cos": {
+   "above | below": 0.96,
+   "to the left of | to the right of": 0.982,
+   "in front of | behind": 0.9,
+   "over | under": 0.95,
+   "on top of | underneath": 0.872,
+   "inside | outside": 0.897,
+   "pushing | pulling": 0.918,
+   "entering | exiting": 0.859
+  },
+  "antonym_mean": 0.917,
+  "synonym_cos": {
+   "holding | grasping": 0.884,
+   "holding | gripping": 0.882,
+   "riding | riding on": 0.967,
+   "next to | beside": 0.955,
+   "on top of | atop": 0.895,
+   "looking at | watching": 0.82,
+   "carrying | transporting": 0.899,
+   "in | inside": 0.923
+  },
+  "synonym_mean": 0.903
+ },
+ "text_space_official": {
+  "tag": "official(student)",
+  "V": 10120,
+  "mean_offdiag_cos": 0.142,
+  "median_neighbours_cos_ge_0.90": 1.0,
+  "eff_dim": 41.6,
+  "antonym_cos": {
+   "above | below": 0.086,
+   "to the left of | to the right of": 0.151,
+   "in front of | behind": 0.049,
+   "over | under": 0.039,
+   "on top of | underneath": -0.11,
+   "inside | outside": 0.475,
+   "pushing | pulling": 0.609,
+   "entering | exiting": 0.623
+  },
+  "antonym_mean": 0.24,
+  "synonym_cos": {
+   "holding | grasping": 0.435,
+   "holding | gripping": 0.566,
+   "riding | riding on": 0.961,
+   "next to | beside": 0.661,
+   "on top of | atop": 0.791,
+   "looking at | watching": 0.751,
+   "carrying | transporting": 0.721,
+   "in | inside": 0.744
+  },
+  "synonym_mean": 0.704,
+  "n_names_in_common": 10120
+ }
+}
