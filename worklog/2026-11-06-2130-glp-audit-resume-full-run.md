@@ -350,3 +350,39 @@ py-spy 对全量训练主线程采样（改前）：`_compute_loss` 46%（其中
 | `barv.prepare --limit 600`（改后） | rc=0，source_counts 正确 |
 | `barv.run_contact`（600 条 cache） | rc=0，report.md 生成 |
 | 训练进程 82761 | 未受影响，epoch 3/4 52% |
+
+## 更新 2026-11-07 13:45（4 轮全量结果核对 + BARV 难负例对照结果）
+
+### 做了什么
+
+- 核对流水线：训练 12:06 正常结束（epoch 2~4 共 13.5 h，日志无 NaN/报错）；`post/DONE` 各步 rc=0，过关判断 rc=3（不过关），`glp_full_e20` 未启动；BARV prepare（471 s）与 run_contact 正常结束。
+- 补跑 epoch 4 `last.pt` 只给框的 dump（流水线只 dump 了 last 的框+类别），重出 `protocol_eval_full_monitor_e4.json` 与 `post/protocol_eval.txt`（7 行：官方 + 我们 e1/e2/e4 各 ±类别）。
+- 结果写进 `reports/baseline_cmp/README.md`（新增 epoch 4 两行 + 「4 轮全程」表 + 重写「怎么读」）与 `progress.md`。
+
+### 结果
+
+训练内验证器（1,024 图）逐轮：pc_R@50 42.62 / **43.59** / 41.98 / 41.18；pc_mR@50 3.55 / 6.63 / 7.74 / **8.64**；pc_F1@50 6.56 / 11.50 / 13.07 / **14.28**；pc_pair_acc 53.70 / **54.91** / 53.17 / 52.26；pair_existence_AP 54.3 / 61.1 / 62.3 / **63.2**；train nce 3.08 / 2.12 / 2.02 / 1.96。
+
+同口径 vs 官方 RA（只给框）：epoch 2 R@50 24.35 / mR@50 1.45 / F1 2.74 / pair_acc 30.59；epoch 4 22.71 / 1.73 / 3.22 / 28.29；官方 26.61 / 13.11 / 17.56 / 34.26。给 GT 类别：epoch 4 F1@50 14.38（R 42.92，mR 8.64，rare 桶 6.21）。
+
+过关判断（`post/gate.json`）：c1 第 4 轮 pc_R@50 < 第 3 轮 → 否；c2 e4 best 只给框 R@50 24.346 vs 参照 24.35（best.pt 就是 epoch 2 权重，差 0.004 是 dump 的随机性）→ 否；c3 pair_acc 54.93 → 是。按约定不过关。
+
+解读：R@50 下降与 mR/F1/pair-existence 上升同时发生、训练损失仍在降，是头部谓词向尾部让 argmax（图约束下每对只出一个谓词），不是过拟合。判据若换成论文主指标 F1@50，则结论相反（4 轮单调上升）。
+
+BARV（`runs/barv_contact/seed42/report.md`，cache 119,525 查询 / 29,772 图，正 43,858 / contact_other 30,239 / contact_unlabeled 45,428；train_core 86,108 / dev 9,388 / test 7,278）：test AUROC 几何 LR 0.6803、几何 MLP（像素置零）0.7500、视觉 0.7767；对 contact_other 0.7064 / 0.7819 / 0.8096，对 contact_unlabeled 0.6621 / 0.7276 / 0.7536。按谓词视觉 > 几何 LR 的有 8/9（touching 0.57 vs 0.67 例外）。
+
+### 没做什么
+
+- 没有起 20 轮：按用户 05:12 确认的判据不过关；换判据是用户的决定（progress.md 待办 0 列了两条路和建议）。
+- 没有跑全量 val（24,964 图）复核「头部换尾部」；1,024 图的 mR 支持数桶 2–4 只有几十条 GT，波动大。
+- BARV 只有 seed 42 一个种子；视觉 +2.7 AUROC（对几何 MLP）尚未做显著性检验。
+- `touching` 视觉低于几何的原因没查（可能是接触类负例对该谓词天然难分）。
+
+### 验证到哪一步
+
+| 项 | 结果 |
+| --- | --- |
+| `post/DONE` | wait/dump×3/protocol_eval/barv_prepare/barv_run_contact = 0，gate = 3，launch_e20 = skipped |
+| 训练日志 grep NaN/error/traceback | 无 |
+| 补 dump `ours_full_e4_last_nocls.pt` | rc=0，validator pc_R@50 0.2172 |
+| 重出 protocol 表 | 7 行，images=1018，GT=9194 |

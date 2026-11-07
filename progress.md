@@ -1,19 +1,25 @@
 # 进度（新开对话先读这里）
 
-最后更新：2026-11-07 05:30
+最后更新：2026-11-07 13:45
 
 ## 正在跑的守护进程（新会话先核对这里）
 
-| 任务 | 进程 | 日志 / 完成标记 | 停止 |
-|---|---|---|---|
-| `glp_full_e4_resume` 全量训练 epoch 2~4 | python PID 82761，PGID 82753（setsid，忽略 SIGHUP，与 IDE 无关） | `logs/full_e4_resume.log`；`runs/test/glp_full_e4_resume/results.csv` 每 epoch 一行 | `kill -- -82753` |
-| 训练收尾流水线 `tools/post_full_e4.sh` v2（等训练退出 → best/last PredCls dump → 与官方 RA 同口径评测 → **过关判断，过关就自动起 20 轮 `glp_full_e20`** → BARV 难负例 cache（`barv.prepare`）→ 几何/视觉对照（`barv.run_contact`）） | PGID 509167（`runs/test/glp_full_e4_resume/post/run.pid`） | `runs/test/glp_full_e4_resume/post/run.log`；过关结果 `post/gate.json`；结束写 `post/DONE`（每步退出码） | `kill -- -509167` |
-| `glp_full_e20`（**仅当过关时由上一行自动启动**，预计 11:00 后，约 78 h） | pid 在 `logs/glp_full_e20.pid`（自成 PGID） | `logs/glp_full_e20.log`；`runs/test/glp_full_e20/results.csv` | `kill -- -$(cat logs/glp_full_e20.pid)` |
-| PSG parquet → OpenPSG 转换 `/root/rivermind-data/psg_hf/convert.sh` | 已结束（03:43 起，8 分钟） | `/root/rivermind-data/psg_hf/convert.log`；`CONVERT_DONE` = `exit=0` | 无 |
+**当前没有本仓库的进程在跑，GPU 空闲**（13:30 时卡上有一个 1 GB、别的容器的进程 PID 444063，不是本仓库的）。
 
-状态快照 2026-11-07 03:50：训练在 epoch 3/4 的 25%，1.06 it/s，显存 15.4 G；epoch 2 的 pc_R@50=0.4359（epoch 1 同 val 复评 0.4303）。预计 epoch 4 结束 + 终评 ≈ 11:00。
+| 任务 | 状态 | 产物 |
+|---|---|---|
+| `glp_full_e4_resume` 全量训练 epoch 2~4 | 12:06 正常结束（3 轮 13.5 h） | `runs/test/glp_full_e4_resume/{results.csv,weights/best.pt(=epoch 2),weights/last.pt(=epoch 4)}` |
+| 收尾流水线 `tools/post_full_e4.sh` v2 | 12:25 全部结束，`post/DONE` 各步 rc=0；**过关判断 rc=3 不过关，20 轮未启动** | `post/gate.json`、`post/protocol_eval.txt`、`reports/baseline_cmp/protocol_eval_full_monitor_e4.json` |
+| BARV 难负例 cache + 对照 | 12:25 结束 | `data/barv_cache_contact/`（119,525 查询 / 29,772 图）、`runs/barv_contact/seed42/report.md` |
+| PSG parquet → OpenPSG 转换 | 03:51 结束 | `/root/rivermind-data/psg_hf/{psg_train_from_hf.json,images/}` |
 
-epoch 2 中途快照同口径评测（04:07，`reports/baseline_cmp/README.md` 已加两行）：框+GT 类别 R@50 45.34 / mR@50 6.63 / pair_acc 54.93（epoch 1：44.81 / 4.07 / 54.27）；只给框 R@50 24.35 / mR@50 1.45 / pair_acc 30.59（epoch 1：23.23 / 1.04 / 29.27；官方 RA：26.61 / 13.11 / 34.26）。头部在涨，尾部谓词仍接近 0。
+### 4 轮全量结果一句话
+
+pc_R@50 在 epoch 2 见顶（43.59）后每轮下降（41.98 → 41.18）；pc_mR@50（6.63 → 7.74 → 8.64）、pc_F1@50（11.50 → 13.07 → 14.28）、pair_existence_AP 每轮上升，训练损失一直在降。头部谓词换尾部谓词，不是过拟合。与官方 RA 同口径：只给框时最好的 epoch 2 R@50 24.35 / mR@50 1.45 / F1 2.74（官方 26.61 / 13.11 / 17.56）；给 GT 类别时 epoch 4 F1@50 14.38 为历次最高。全表 `reports/baseline_cmp/README.md`。
+
+### BARV 难负例对照一句话
+
+去掉几何捷径后（负例 = 几何接触、类别合法、未标注），test AUROC：几何 LR 0.680 / 几何 MLP（像素置零）0.750 / 视觉 0.777；对 contact_other 负例 0.706 / 0.782 / 0.810。视觉特征在 9 个谓词里 8 个高于几何 LR（touching 例外 0.57 vs 0.67）。pilot 上 0.996 vs 0.994 的「无差别」是几何捷径造成的，现在差别出来了，但绝对水平只有 0.78。
 
 ## 已完成的事项
 
@@ -37,15 +43,16 @@ epoch 2 中途快照同口径评测（04:07，`reports/baseline_cmp/README.md` �
 
 ## 未完成的待办
 
-0. BARV 续做：难负例规则已实现并在第 0 片验证（几何 LR 0.97→0.63，`configs/barv_psg_contact.yaml`）。数据已转换完（见上）。`tools/post_full_e4.sh` 第 5 步会自动跑：`barv.prepare` 全量重建 cache（`data/barv_cache_contact/`，`source` 列现在区分 contact_other/contact_unlabeled）→ `barv.run_contact`（几何 LR / no_visual MLP / 视觉 scorer，dev 选 epoch、test 报总体与按负例来源的 AUROC，输出 `runs/barv_contact/seed42/report.md`）。看完 report 再决定 BARV 下一步（多种子、ROI 增益实验）。
-
-1. 等 `glp_full_e4_resume` 跑完（≈ 11:00）：过关判断与 `glp_full_e20` 启动已自动化（见守护进程表与 `post/gate.json`）；人工要做的是核对 `gate.json`、若未过关分析原因。`tools/post_full_e4.sh` 会自动产出 `reports/baseline_cmp/ours_full_e4_{best_cls,best_nocls,last_cls}.pt`、`protocol_eval_full_monitor_e4.json`、`post/protocol_eval.txt`；人工要做的是把结果写进 `reports/baseline_cmp/README.md`，并对比 epoch 2~4 的 `pc_R@50 / pc_mR@50_sup_ge20 / pc_pair_acc` 与 v8 同轮（`runs/test/glp_50k_v8_cfa_e14/results.csv`），注意两者词表不同（10,370 vs 2,809），不是单变量对照。
-2. 对 best.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`，`rel.val(protocol="predcls")`）。
+0. **待用户拍板（GPU 现在空着）**：4 轮短跑按约定的 pc_R@50 判据不过关，20 轮没起。两条路：
+   (a) 维持 pc_R@50 判据 → 不起 20 轮，先做消融 A3（场头监督）/ 修已知训练缺陷，再按流程重跑 4 轮；
+   (b) 改以论文主指标 F1@50 为「还在涨」的判据（4 轮单调上升 11.5→14.3，未饱和）→ 立即起 `glp_full_e20`（README 命令，约 78 h）。
+   建议 (a)：20 轮会把已知缺陷（场头在 `field_fuse=max` 下只靠 0.25×sigmoid 拿梯度、rel focal 只训 128 对等）一起固化 3 天；且 R@50 与 pair_acc 在掉，不是单纯「还没收敛」。
+1. BARV 下一步（看完 `runs/barv_contact/seed42/report.md` 后）：多种子（3 个）确认视觉 +2.7 AUROC 不是噪声；`contact_unlabeled` 标注噪声单独消融；再决定做不做 ROI 增益 / teacher-value 实验。
+2. 对 best.pt / last.pt 跑全量 val（24,964 图，`RA-4M/data_full.yaml`，`rel.val(protocol="predcls")`），确认 1,024 图上的「头部换尾部」在全量 val 上成立。
 3. 消融 A3：让场头的候选列拿到排序监督（M 路 CE 或 NCE 读 fused），再比较 field/max/raw。按 README 流程：每个变体先 4 轮，过关的再 20 轮；GPU 一次只跑一个，排队。
-3b. 把 README 里的「训练 → dump → 评测 → 过关判断」收成一个入口脚本 `tools/run_exp.sh`（配置区在顶部，守护启动，结束写 DONE）。现在 GPU 被全量训练占着没法自测，等 11:00 后再写并用 50k 代理 1 轮冒烟。
-4. 决定是否提交当前工作树（含 v8 改动 + 本次改动）；`mobileclip_s0_pt_7z_parts/` 应 ignore 或移出。
-5. BARV：重建难负例后再决定是否继续。
-6. 重写或标注过期文档：`GLP_INNOVATIONS_IMPLEMENTATION.md`、`新手指南.txt`、`barv/README.md`。
+3b. 把 README 里的「训练 → dump → 评测 → 过关判断」收成一个入口脚本 `tools/run_exp.sh`（配置区在顶部，守护启动，结束写 DONE）。GPU 已空，可用 50k 代理 1 轮冒烟。
+4. `mobileclip_s0_pt_7z_parts/` 应 ignore 或移出。
+5. 重写或标注过期文档：`GLP_INNOVATIONS_IMPLEMENTATION.md`、`新手指南.txt`、`barv/README.md`。
 
 ## 环境速查
 
